@@ -11,7 +11,7 @@ Protocole (v1beta BidiGenerateContent)
 3. Attente du message ``setupComplete`` du serveur.
 4. En parallèle :
    - Boucle d'envoi  : dépile les chunks base64 de la queue audio et les
-     envoie via ``realtimeInput``.
+     envoie via ``realtimeInput.mediaChunks``.
    - Boucle de réception : lit les messages ``serverContent`` et extrait
      les parties texte pour les passer au callback UI.
 
@@ -103,11 +103,13 @@ class GeminiClient:
             b64_chunk: str = await self._audio_queue.get()
             msg = {
                 "realtimeInput": {
-                    "audio": {
-                        # Type MIME attendu par Gemini Live pour du PCM 16-bit
-                        "mimeType": f"audio/pcm;rate={SAMPLE_RATE}",
-                        "data": b64_chunk,
-                    }
+                    # Format attendu par BidiGenerateContent : tableau de blobs
+                    "mediaChunks": [
+                        {
+                            "mimeType": f"audio/pcm;rate={SAMPLE_RATE}",
+                            "data": b64_chunk,
+                        }
+                    ]
                 }
             }
             try:
