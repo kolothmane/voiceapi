@@ -138,14 +138,18 @@ class OverlayWindow(QWidget):
         clear_btn = QPushButton("🗑")
         clear_btn.setFixedSize(22, 22)
         clear_btn.setToolTip("Effacer le texte")
-        clear_btn.setStyleSheet(self._btn_style("rgba(80, 100, 255, 0.75)"))
+        clear_btn.setStyleSheet(
+            self._btn_style("rgba(80, 100, 255, 0.75)", "rgba(80, 100, 255, 1.0)")
+        )
         clear_btn.clicked.connect(self._clear_text)
 
         # Bouton "Fermer"
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(22, 22)
         close_btn.setToolTip("Fermer")
-        close_btn.setStyleSheet(self._btn_style("rgba(220, 60, 60, 0.80)"))
+        close_btn.setStyleSheet(
+            self._btn_style("rgba(220, 60, 60, 0.80)", "rgba(220, 60, 60, 1.0)")
+        )
         close_btn.clicked.connect(QApplication.instance().quit)
 
         layout.addWidget(title)
@@ -208,13 +212,13 @@ class OverlayWindow(QWidget):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _btn_style(base_color: str) -> str:
+    def _btn_style(base_color: str, hover_color: str) -> str:
         return (
             f"QPushButton {{"
             f"  background: {base_color}; color: white;"
             f"  border-radius: 11px; font-size: 10px; border: none;"
             f"}}"
-            f"QPushButton:hover {{ background: {base_color.replace('0.7', '1.0').replace('0.75', '1.0').replace('0.80', '1.0')}; }}"
+            f"QPushButton:hover {{ background: {hover_color}; }}"
         )
 
     # ------------------------------------------------------------------

@@ -24,7 +24,7 @@ import json
 import websockets
 import websockets.exceptions
 
-from config import GEMINI_MODEL, GEMINI_WS_URI, SYSTEM_PROMPT
+from config import GEMINI_MODEL, GEMINI_WS_URI, SAMPLE_RATE, SYSTEM_PROMPT
 
 
 class GeminiClient:
@@ -91,7 +91,7 @@ class GeminiClient:
                 "realtimeInput": {
                     "audio": {
                         # Type MIME attendu par Gemini Live pour du PCM 16-bit
-                        "mimeType": f"audio/pcm;rate=16000",
+                        "mimeType": f"audio/pcm;rate={SAMPLE_RATE}",
                         "data": b64_chunk,
                     }
                 }
