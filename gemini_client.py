@@ -1,9 +1,10 @@
 """
 gemini_client.py – Client WebSocket pour l'API Gemini Multimodal Live.
 
-Protocole (v1beta BidiGenerateContent)
+Protocole (v1alpha BidiGenerateContent)
 ----------------------------------------
 1. Connexion WebSocket sur l'URI construite depuis la clé API fournie.
+   Les modèles native-audio requièrent le endpoint v1alpha.
 2. Envoi d'un message ``setup`` contenant :
    - le modèle utilisé,
    - les modalités de réponse (TEXT),
@@ -127,7 +128,9 @@ class GeminiClient:
         async for raw in self._ws:
             try:
                 data = json.loads(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError, ValueError):
+                # JSONDecodeError : message non-JSON (ex. frame de contrôle)
+                # TypeError / ValueError : frame binaire ou encodage inattendu
                 continue
 
             # Structure : serverContent → modelTurn → parts[].text
@@ -152,9 +155,10 @@ class GeminiClient:
         print(f"[Gemini] Connexion à {self._ws_uri[:60]}…")
         async with websockets.connect(
             self._ws_uri,
-            # Timeout de ping pour détecter les coupures réseau
-            ping_interval=20,
-            ping_timeout=30,
+            # Les pings WebSocket (protocole niveau transport) ne sont pas
+            # supportés par Gemini Live – on les désactive pour éviter des
+            # déconnexions intempestives.
+            ping_interval=None,
             # Limite supérieure de la taille des messages WebSocket (100 MB)
             max_size=100 * 1024 * 1024,
         ) as ws:

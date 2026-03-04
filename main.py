@@ -44,7 +44,7 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
     2. Démarre la capture audio (threads dédiés).
     3. Lance le client Gemini WebSocket avec la clé API et le prompt
        (enrichi du CV si présent).
-    4. En cas d'erreur, affiche le message dans l'overlay.
+    4. En cas d'erreur, reconnexion automatique avec backoff exponentiel.
     """
     bridge.status_changed.emit("⏳ Connexion à Gemini…")
 
@@ -73,16 +73,32 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
         system_prompt=system_prompt,
     )
 
+    retry_delay = 5  # secondes avant la première tentative de reconnexion
+
     try:
-        await client.run()
-    except asyncio.CancelledError:
-        # Annulation intentionnelle lors d'un changement de paramètres en cours de session
-        print("[Main] Session annulée pour rechargement des paramètres.")
-    except Exception as exc:
-        error_msg = f"\n\n⚠️  Erreur Gemini : {exc}"
-        bridge.text_received.emit(error_msg)
-        bridge.status_changed.emit("🔴 Déconnecté")
-        print(f"[Main] {error_msg}")
+        while True:
+            try:
+                bridge.status_changed.emit("⏳ Connexion à Gemini…")
+                await client.run()
+                # Sortie propre (ne devrait pas arriver en cours de session)
+                break
+            except asyncio.CancelledError:
+                # Annulation intentionnelle (changement de paramètres)
+                raise
+            except Exception as exc:
+                error_msg = f"\n\n⚠️  Erreur Gemini : {exc}"
+                bridge.text_received.emit(error_msg)
+                bridge.status_changed.emit(f"🔁 Reconnexion dans {retry_delay}s…")
+                print(f"[Main] {error_msg}")
+                await asyncio.sleep(retry_delay)
+                # Vider l'audio en attente pour éviter d'envoyer de vieux chunks
+                while not audio_queue.empty():
+                    try:
+                        audio_queue.get_nowait()
+                    except Exception:
+                        break
+                # Backoff exponentiel plafonné à 60 s
+                retry_delay = min(retry_delay * 2, 60)
     finally:
         engine.stop()
 

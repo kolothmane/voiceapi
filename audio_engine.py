@@ -71,6 +71,27 @@ class AudioEngine:
         self._queue = audio_queue
         self._running = False
         self._threads: list[threading.Thread] = []
+        self._dropped_chunks: int = 0  # compteur pour le monitoring
+
+    # ------------------------------------------------------------------
+    # Utilitaire partagé – injection thread-safe
+    # ------------------------------------------------------------------
+
+    def _safe_enqueue(self, encoded: str) -> None:
+        """
+        Dépose un chunk base64 dans la queue depuis le thread asyncio.
+        Si la queue est pleine, le chunk est silencieusement abandonné
+        (log périodique toutes les 100 pertes pour éviter le flood).
+        """
+        try:
+            self._queue.put_nowait(encoded)
+        except asyncio.QueueFull:
+            self._dropped_chunks += 1
+            if self._dropped_chunks % 100 == 1:
+                print(
+                    f"[Audio] Queue pleine : {self._dropped_chunks} chunk(s) abandonnés. "
+                    "Réseau trop lent ou Gemini déconnecté ?"
+                )
 
     # ------------------------------------------------------------------
     # Microphone (sounddevice – cross-platform)
@@ -83,8 +104,7 @@ class AudioEngine:
         # Conversion en PCM int16 puis encodage base64
         pcm_bytes = indata.copy().astype(np.int16).tobytes()
         encoded = base64.b64encode(pcm_bytes).decode("utf-8")
-        # Injection thread-safe dans la queue asyncio
-        self._loop.call_soon_threadsafe(self._queue.put_nowait, encoded)
+        self._loop.call_soon_threadsafe(self._safe_enqueue, encoded)
 
     def _capture_mic(self) -> None:
         """Boucle de capture micro – tourne dans un thread dédié."""
@@ -130,7 +150,7 @@ class AudioEngine:
                         data = recorder.record(numframes=CHUNK_SIZE)
                         pcm = (data * 32767).astype(np.int16)
                         encoded = base64.b64encode(pcm.tobytes()).decode("utf-8")
-                        self._loop.call_soon_threadsafe(self._queue.put_nowait, encoded)
+                        self._loop.call_soon_threadsafe(self._safe_enqueue, encoded)
                 return  # succès → on ne passe pas aux alternatives
             except Exception as exc:
                 print(

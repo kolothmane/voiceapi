@@ -13,10 +13,12 @@ sont gérés dynamiquement via ``settings.py``.
 # Modèle Gemini utilisé (doit supporter la modalité audio en temps réel)
 GEMINI_MODEL: str = "models/gemini-2.5-flash-native-audio-latest"
 
-# Template d'URI WebSocket – la clé API est injectée au moment de la connexion
+# Template d'URI WebSocket – la clé API est injectée au moment de la connexion.
+# Les modèles native-audio (gemini-2.5-flash-native-audio-*) requièrent v1alpha ;
+# c'est également la version spécifiée dans les instructions d'origine du projet.
 GEMINI_WS_URI_TEMPLATE: str = (
     "wss://generativelanguage.googleapis.com/ws/"
-    "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
     "?key={api_key}"
 )
 
