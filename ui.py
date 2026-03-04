@@ -1,36 +1,43 @@
 """
-ui.py – Fenêtre overlay PyQt6 : sans bordures, semi-transparente, always-on-top.
+ui.py – Interface graphique PyQt6 de l'assistant d'entretien.
 
-Design
-------
-* Fond sombre arrondi avec légère transparence.
-* Barre de titre avec boutons Fermer (✕) et Effacer (🗑).
-* Zone de texte défilante pour les réponses Gemini.
-* Indicateur de statut en bas (connexion, live, erreur).
-* Déplaçable par glisser-déposer sur la barre de titre ou n'importe où.
+Composants
+----------
+* ``TextBridge``     – pont thread-safe asyncio → Qt (signaux).
+* ``SettingsDialog`` – boîte de dialogue de configuration (clé API, CV, prompt).
+* ``OverlayWindow``  – fenêtre overlay sans bordures, always-on-top, déplaçable.
 
 Thread safety
 -------------
-La classe ``TextBridge`` utilise un signal Qt pour transmettre le texte
+La classe ``TextBridge`` utilise des signaux Qt pour transmettre les données
 depuis la boucle asyncio vers le thread principal Qt.
 Émettre un signal Qt est toujours thread-safe.
 """
 
 import sys
+from pathlib import Path
 
 from PyQt6.QtCore import QPoint, Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from config import FONT_SIZE, WINDOW_HEIGHT, WINDOW_OPACITY, WINDOW_WIDTH
+from settings import DEFAULT_SYSTEM_PROMPT, extract_cv_text, save_settings
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +60,325 @@ class TextBridge(QObject):
 
     text_received = pyqtSignal(str)
     status_changed = pyqtSignal(str)
+    # Émis lorsque l'utilisateur sauvegarde de nouveaux paramètres ;
+    # main.py écoute ce signal pour relancer la connexion Gemini.
+    restart_requested = pyqtSignal(dict)
+
+
+# ---------------------------------------------------------------------------
+# Styles partagés
+# ---------------------------------------------------------------------------
+
+_DARK_DIALOG_STYLE = """
+    QDialog {
+        background-color: #12121c;
+    }
+    QLabel {
+        color: #bec8ff;
+        background: transparent;
+    }
+    QLabel#section_title {
+        color: rgba(190, 200, 255, 0.9);
+        font-weight: bold;
+        font-size: 12px;
+    }
+    QLineEdit, QTextEdit {
+        background-color: #1e1e32;
+        color: #e1e6ff;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 6px;
+        padding: 6px;
+        selection-background-color: rgba(80, 100, 255, 0.6);
+    }
+    QLineEdit:focus, QTextEdit:focus {
+        border: 1px solid rgba(80, 100, 255, 0.8);
+    }
+    QPushButton {
+        background: rgba(80, 100, 255, 0.75);
+        color: white;
+        border: none;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 12px;
+    }
+    QPushButton:hover {
+        background: rgba(80, 100, 255, 1.0);
+    }
+    QPushButton:disabled {
+        background: rgba(80, 100, 255, 0.3);
+        color: rgba(255, 255, 255, 0.4);
+    }
+    QPushButton#danger_btn {
+        background: rgba(220, 60, 60, 0.75);
+    }
+    QPushButton#danger_btn:hover {
+        background: rgba(220, 60, 60, 1.0);
+    }
+    QPushButton#secondary_btn {
+        background: rgba(60, 65, 100, 0.75);
+    }
+    QPushButton#secondary_btn:hover {
+        background: rgba(60, 65, 100, 1.0);
+    }
+    QScrollBar:vertical {
+        width: 6px;
+        background: transparent;
+        margin: 2px 0;
+    }
+    QScrollBar::handle:vertical {
+        background: rgba(255, 255, 255, 0.25);
+        border-radius: 3px;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
+    }
+    QFrame#separator {
+        color: rgba(255, 255, 255, 0.12);
+    }
+"""
+
+
+# ---------------------------------------------------------------------------
+# Boîte de dialogue de configuration
+# ---------------------------------------------------------------------------
+
+
+class SettingsDialog(QDialog):
+    """
+    Dialogue de configuration de l'assistant.
+
+    Permet à l'utilisateur de saisir :
+    * Sa clé API Gemini.
+    * Son CV (PDF ou TXT) pour personnaliser les réponses.
+    * Un prompt système personnalisé.
+
+    Les paramètres sont passés en entrée (``current_settings``) pour
+    pré-remplir les champs et récupérés via ``get_settings()`` après
+    validation.
+    """
+
+    def __init__(self, current_settings: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._settings = dict(current_settings)
+        self.setWindowTitle("⚙  Configuration – Interview Assistant")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(_DARK_DIALOG_STYLE)
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    # Construction de l'UI
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        layout.addWidget(self._build_api_section())
+        layout.addWidget(self._make_separator())
+        layout.addWidget(self._build_cv_section())
+        layout.addWidget(self._make_separator())
+        layout.addWidget(self._build_prompt_section())
+        layout.addStretch()
+        layout.addWidget(self._build_button_row())
+
+    def _make_separator(self) -> QFrame:
+        sep = QFrame()
+        sep.setObjectName("separator")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        return sep
+
+    def _build_api_section(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        title = QLabel("🔑  Clé API Gemini")
+        title.setObjectName("section_title")
+        layout.addWidget(title)
+
+        hint = QLabel(
+            "Obtenez votre clé gratuitement sur "
+            "<a href='https://aistudio.google.com/app/apikey' "
+            "style='color:#7090ff;'>aistudio.google.com</a>."
+        )
+        hint.setOpenExternalLinks(True)
+        hint.setStyleSheet("color: rgba(180,190,220,0.75); font-size: 11px; background: transparent;")
+        layout.addWidget(hint)
+
+        key_row = QHBoxLayout()
+        self._api_key_edit = QLineEdit()
+        self._api_key_edit.setPlaceholderText("AIza…")
+        self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._api_key_edit.setText(self._settings.get("api_key", ""))
+        self._api_key_edit.textChanged.connect(self._update_start_button)
+
+        toggle_btn = QPushButton("👁")
+        toggle_btn.setObjectName("secondary_btn")
+        toggle_btn.setFixedWidth(36)
+        toggle_btn.setToolTip("Afficher / masquer la clé")
+        toggle_btn.clicked.connect(self._toggle_key_visibility)
+
+        key_row.addWidget(self._api_key_edit)
+        key_row.addWidget(toggle_btn)
+        layout.addLayout(key_row)
+
+        return widget
+
+    def _build_cv_section(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        title = QLabel("📄  CV / Resume  (optionnel)")
+        title.setObjectName("section_title")
+        layout.addWidget(title)
+
+        hint = QLabel("Importez votre CV pour que Gemini adapte ses réponses à votre profil.")
+        hint.setStyleSheet("color: rgba(180,190,220,0.75); font-size: 11px; background: transparent;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        browse_btn = QPushButton("📂  Parcourir…")
+        browse_btn.clicked.connect(self._browse_cv)
+
+        self._cv_clear_btn = QPushButton("✕  Supprimer")
+        self._cv_clear_btn.setObjectName("danger_btn")
+        self._cv_clear_btn.clicked.connect(self._clear_cv)
+        self._cv_clear_btn.setEnabled(bool(self._settings.get("cv_path")))
+
+        btn_row.addWidget(browse_btn)
+        btn_row.addWidget(self._cv_clear_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self._cv_path_label = QLabel(
+            self._settings.get("cv_path") or "Aucun fichier sélectionné"
+        )
+        self._cv_path_label.setStyleSheet(
+            "color: rgba(160,170,200,0.80); font-size: 11px; background: transparent;"
+        )
+        self._cv_path_label.setWordWrap(True)
+        layout.addWidget(self._cv_path_label)
+
+        # Aperçu du texte extrait (read-only, collapsible)
+        self._cv_preview = QTextEdit()
+        self._cv_preview.setReadOnly(True)
+        self._cv_preview.setPlaceholderText("Le texte extrait de votre CV s'affichera ici…")
+        self._cv_preview.setFixedHeight(90)
+        self._cv_preview.setPlainText(self._settings.get("cv_text", ""))
+        layout.addWidget(self._cv_preview)
+
+        return widget
+
+    def _build_prompt_section(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        title_row = QHBoxLayout()
+        title = QLabel("✏️  Prompt système")
+        title.setObjectName("section_title")
+        title_row.addWidget(title)
+        title_row.addStretch()
+
+        reset_btn = QPushButton("↺  Réinitialiser")
+        reset_btn.setObjectName("secondary_btn")
+        reset_btn.setToolTip("Rétablir le prompt par défaut")
+        reset_btn.clicked.connect(self._reset_prompt)
+        title_row.addWidget(reset_btn)
+        layout.addLayout(title_row)
+
+        hint = QLabel("Instructions envoyées à Gemini avant chaque session.")
+        hint.setStyleSheet("color: rgba(180,190,220,0.75); font-size: 11px; background: transparent;")
+        layout.addWidget(hint)
+
+        self._prompt_edit = QTextEdit()
+        self._prompt_edit.setPlainText(
+            self._settings.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+        )
+        self._prompt_edit.setMinimumHeight(100)
+        self._prompt_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        layout.addWidget(self._prompt_edit)
+
+        return widget
+
+    def _build_button_row(self) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch()
+
+        cancel_btn = QPushButton("✕  Annuler")
+        cancel_btn.setObjectName("danger_btn")
+        cancel_btn.clicked.connect(self.reject)
+
+        self._start_btn = QPushButton("✓  Sauvegarder && Démarrer")
+        self._start_btn.clicked.connect(self._on_accept)
+        self._update_start_button()
+
+        layout.addWidget(cancel_btn)
+        layout.addWidget(self._start_btn)
+        return widget
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _toggle_key_visibility(self) -> None:
+        if self._api_key_edit.echoMode() == QLineEdit.EchoMode.Password:
+            self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+        else:
+            self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+
+    def _update_start_button(self) -> None:
+        self._start_btn.setEnabled(bool(self._api_key_edit.text().strip()))
+
+    def _browse_cv(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner votre CV",
+            str(Path.home()),
+            "Documents (*.pdf *.txt);;PDF (*.pdf);;Texte (*.txt);;Tous (*.*)",
+        )
+        if not path:
+            return
+        text = extract_cv_text(path)
+        self._settings["cv_path"] = path
+        self._settings["cv_text"] = text
+        self._cv_path_label.setText(path)
+        self._cv_preview.setPlainText(text)
+        self._cv_clear_btn.setEnabled(True)
+
+    def _clear_cv(self) -> None:
+        self._settings["cv_path"] = ""
+        self._settings["cv_text"] = ""
+        self._cv_path_label.setText("Aucun fichier sélectionné")
+        self._cv_preview.setPlainText("")
+        self._cv_clear_btn.setEnabled(False)
+
+    def _reset_prompt(self) -> None:
+        self._prompt_edit.setPlainText(DEFAULT_SYSTEM_PROMPT)
+
+    def _on_accept(self) -> None:
+        self._settings["api_key"] = self._api_key_edit.text().strip()
+        self._settings["system_prompt"] = self._prompt_edit.toPlainText().strip()
+        self.accept()
+
+    # ------------------------------------------------------------------
+    # Données résultantes
+    # ------------------------------------------------------------------
+
+    def get_settings(self) -> dict:
+        """Renvoie le dictionnaire de paramètres mis à jour par l'utilisateur."""
+        return dict(self._settings)
 
 
 # ---------------------------------------------------------------------------
@@ -67,11 +393,13 @@ class OverlayWindow(QWidget):
     - Toujours au premier plan (WindowStaysOnTopHint)
     - Fond semi-transparent
     - Déplaçable à la souris
+    - Bouton ⚙ pour ouvrir la boîte de dialogue de configuration
     """
 
-    def __init__(self, bridge: TextBridge) -> None:
+    def __init__(self, bridge: TextBridge, settings: dict) -> None:
         super().__init__()
         self._bridge = bridge
+        self._settings = dict(settings)
         self._drag_pos: QPoint = QPoint()
         self._full_text: str = ""  # historique complet des réponses
         self._init_window_flags()
@@ -134,6 +462,15 @@ class OverlayWindow(QWidget):
             "background: transparent;"
         )
 
+        # Bouton "Paramètres"
+        settings_btn = QPushButton("⚙")
+        settings_btn.setFixedSize(22, 22)
+        settings_btn.setToolTip("Paramètres")
+        settings_btn.setStyleSheet(
+            self._btn_style("rgba(60, 80, 180, 0.75)", "rgba(60, 80, 180, 1.0)")
+        )
+        settings_btn.clicked.connect(self._open_settings)
+
         # Bouton "Effacer le texte"
         clear_btn = QPushButton("🗑")
         clear_btn.setFixedSize(22, 22)
@@ -154,6 +491,7 @@ class OverlayWindow(QWidget):
 
         layout.addWidget(title)
         layout.addStretch()
+        layout.addWidget(settings_btn)
         layout.addWidget(clear_btn)
         layout.addWidget(close_btn)
         return layout
@@ -241,6 +579,18 @@ class OverlayWindow(QWidget):
         self._full_text = ""
         self._text_label.setText("")
 
+    def _open_settings(self) -> None:
+        """Ouvre la boîte de dialogue de configuration."""
+        dialog = SettingsDialog(self._settings, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_settings = dialog.get_settings()
+            self._settings = new_settings
+            save_settings(new_settings)
+            # Demande à main.py de relancer la connexion avec les nouveaux paramètres
+            self._bridge.restart_requested.emit(new_settings)
+            self._on_status_changed("⏳ Reconnexion avec les nouveaux paramètres…")
+            self._clear_text()
+
     # ------------------------------------------------------------------
     # Déplacement de la fenêtre à la souris
     # ------------------------------------------------------------------
@@ -256,3 +606,4 @@ class OverlayWindow(QWidget):
         if event.buttons() == Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
+

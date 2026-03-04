@@ -19,3 +19,6 @@ soundcard>=0.4.2
 
 # Traitement numérique des tableaux audio
 numpy>=1.24.0
+
+# Lecture de fichiers PDF pour l'extraction du CV
+pypdf>=3.0.0
