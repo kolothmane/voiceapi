@@ -1,0 +1,21 @@
+# Dépendances Python – Assistant d'entretien en temps réel
+# Installez avec : pip install -r requirements.txt
+
+# Interface graphique Qt6
+PyQt6>=6.4.0
+
+# Pont asyncio ↔ Qt (nécessaire pour que la boucle asyncio tourne dans le thread Qt)
+qasync>=0.27.0
+
+# WebSocket client (API Gemini Multimodal Live)
+websockets>=12.0
+
+# Capture audio microphone (cross-platform)
+sounddevice>=0.4.6
+
+# Capture audio loopback système (WASAPI sur Windows)
+# Sur Linux/macOS, peut être omis si vous utilisez LOOPBACK_DEVICE
+soundcard>=0.4.2
+
+# Traitement numérique des tableaux audio
+numpy>=1.24.0
