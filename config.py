@@ -11,7 +11,7 @@ sont gérés dynamiquement via ``settings.py``.
 # ---------------------------------------------------------------------------
 
 # Modèle Gemini utilisé (doit supporter la modalité audio en temps réel)
-GEMINI_MODEL: str = "models/gemini-2.0-flash-live-001"
+GEMINI_MODEL: str = "models/gemini-2.5-flash-native-audio-latest"
 
 # Template d'URI WebSocket – la clé API est injectée au moment de la connexion
 GEMINI_WS_URI_TEMPLATE: str = (
