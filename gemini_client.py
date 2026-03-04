@@ -1,7 +1,7 @@
 """
 gemini_client.py – Client WebSocket pour l'API Gemini Multimodal Live.
 
-Protocole (v1alpha BidiGenerateContent)
+Protocole (v1beta BidiGenerateContent)
 ----------------------------------------
 1. Connexion WebSocket sur l'URI construite depuis la clé API fournie.
 2. Envoi d'un message ``setup`` contenant :
