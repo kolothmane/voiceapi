@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# User settings (contains API key)
+.voiceapi/
+
+# PyInstaller
+*.spec
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db

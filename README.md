@@ -9,14 +9,29 @@ flottante semi-transparente, toujours au premier plan.
 
 ---
 
+## ✨ Fonctionnalités
+
+| Fonctionnalité | Description |
+|---|---|
+| 🎙 Capture audio | Micro + loopback système (recruteur) en simultané |
+| 🤖 Gemini Live | Réponses texte en streaming via WebSocket |
+| 📄 Upload de CV | Importez votre CV (PDF ou TXT) pour personnaliser les réponses |
+| ✏️ Prompt personnalisé | Modifiez le contexte envoyé à Gemini depuis l'interface |
+| ⚙ Interface de configuration | Dialogue graphique au démarrage – pas de ligne de commande requise |
+| 💾 Persistance | Les paramètres sont sauvegardés dans `~/.voiceapi/settings.json` |
+| 🔄 Reconnexion à chaud | Changez les paramètres en cours de session sans quitter l'application |
+
+---
+
 ## 📁 Architecture du projet
 
 ```
 voiceapi/
-├── config.py          # Clé API, constantes audio et UI, prompt système
+├── settings.py        # Persistance des paramètres (clé API, CV, prompt)
+├── config.py          # Constantes statiques : modèle Gemini, audio, UI
 ├── audio_engine.py    # Capture micro + loopback (sounddevice / soundcard)
 ├── gemini_client.py   # Client WebSocket Gemini Multimodal Live
-├── ui.py              # Fenêtre overlay PyQt6 (sans bordures, transparente)
+├── ui.py              # Fenêtre overlay + dialogue de configuration (PyQt6)
 ├── main.py            # Point d'entrée – lie tous les modules
 ├── requirements.txt   # Dépendances Python
 └── README.md          # Ce fichier
@@ -84,29 +99,40 @@ pip install -r requirements.txt
 
 ---
 
-### Étape 5 – Obtenir et configurer la clé API Gemini
+### Étape 5 – Lancer l'application
 
-1. Rendez-vous sur [Google AI Studio](https://aistudio.google.com/app/apikey).
-2. Cliquez sur **Create API key** et copiez la clé générée.
-3. Définissez la variable d'environnement `GEMINI_API_KEY` :
-
-**Windows (PowerShell) :**
-```powershell
-$env:GEMINI_API_KEY = "AIzaSy..."
-```
-
-**Windows (Invite de commandes, permanent) :**
-```cmd
-setx GEMINI_API_KEY "AIzaSy..."
-```
-
-**Linux / macOS :**
 ```bash
-export GEMINI_API_KEY="AIzaSy..."
-# Pour rendre permanent, ajoutez la ligne ci-dessus à ~/.bashrc ou ~/.zshrc
+python main.py
 ```
 
-> ⚠️ Ne committez **jamais** votre clé API dans un dépôt Git.
+**Au premier lancement**, si aucune clé API n'est détectée, la fenêtre de
+configuration s'ouvre automatiquement :
+
+```
+┌──────────────────────────────────────────────┐
+│  ⚙  Configuration – Interview Assistant      │
+│                                              │
+│  🔑 Clé API Gemini                           │
+│  ┌─────────────────────────────────┐  [👁]   │
+│  │ AIzaSy...                       │         │
+│  └─────────────────────────────────┘         │
+│                                              │
+│  📄 CV / Resume (optionnel)                  │
+│  [📂 Parcourir…]  [✕ Supprimer]             │
+│  Aperçu du texte extrait…                    │
+│                                              │
+│  ✏️ Prompt système          [↺ Réinitialiser] │
+│  ┌─────────────────────────────────────────┐ │
+│  │ Tu es un assistant furtif…              │ │
+│  └─────────────────────────────────────────┘ │
+│                                              │
+│              [✕ Annuler] [✓ Sauvegarder & Démarrer] │
+└──────────────────────────────────────────────┘
+```
+
+Remplissez votre clé API, puis cliquez **Sauvegarder & Démarrer**.
+Les paramètres sont sauvegardés dans `~/.voiceapi/settings.json` pour
+les prochains lancements.
 
 ---
 
@@ -151,36 +177,119 @@ Installez [BlackHole](https://github.com/ExistentialAudio/BlackHole) (gratuit) :
 
 ---
 
-### Étape 7 – Lancer l'application
+### Étape 7 – Utiliser la fenêtre overlay
 
-```bash
-python main.py
-```
-
-Une fenêtre flottante semi-transparente apparaît en haut à droite de l'écran.
-Commencez votre entretien : l'assistant écoute et affiche ses suggestions en temps réel.
+Une fois démarré, une fenêtre flottante semi-transparente s'affiche.
+L'assistant écoute en temps réel et affiche ses suggestions.
 
 **Contrôles de la fenêtre :**
 
-| Action | Comment |
+| Bouton / Action | Effet |
 |---|---|
-| Déplacer la fenêtre | Clic gauche maintenu + glisser |
-| Effacer le texte | Bouton 🗑 |
-| Fermer l'application | Bouton ✕ |
+| Clic gauche maintenu + glisser | Déplacer la fenêtre |
+| ⚙ | Ouvrir les paramètres (clé API, CV, prompt) |
+| 🗑 | Effacer le texte affiché |
+| ✕ | Fermer l'application |
+
+> **Paramètres en cours de session :** Le bouton ⚙ permet de changer la clé API,
+> le CV ou le prompt **sans quitter** l'application. La connexion Gemini est
+> automatiquement relancée avec les nouveaux paramètres.
 
 ---
 
-### Étape 8 – Personnaliser le prompt système (optionnel)
+## 📄 Upload de CV
 
-Ouvrez `config.py` et modifiez la constante `SYSTEM_PROMPT` pour adapter
-l'assistant à votre secteur, votre poste cible, ou votre style de réponse souhaité.
+Importez votre CV pour que Gemini adapte ses réponses à votre profil
+(compétences, expériences, formations).
 
-```python
-SYSTEM_PROMPT = (
-    "Tu es un assistant furtif. Ton rôle est d'écouter la conversation et de me "
-    "souffler des réponses courtes, percutantes et techniques. ..."
-)
+**Formats supportés :**
+
+| Format | Méthode d'extraction |
+|---|---|
+| `.txt` | Lecture directe |
+| `.pdf` | Extraction via `pypdf` |
+| Autres | Tentative de lecture comme texte brut |
+
+Le texte extrait est ajouté automatiquement au prompt système sous la forme :
+
 ```
+[Votre prompt personnalisé]
+
+=== MON CV ===
+[Contenu du CV]
+===============
+```
+
+---
+
+## ✏️ Prompt système personnalisé
+
+Le prompt système définit le comportement de Gemini pendant la session.
+Modifiez-le depuis l'interface ⚙ pour l'adapter à votre secteur, poste ou style.
+
+**Prompt par défaut :**
+```
+Tu es un assistant furtif. Ton rôle est d'écouter la conversation et de me
+souffler des réponses courtes, percutantes et techniques. L'entretien concerne
+une recherche de stage de 6 mois à partir d'avril 2026, dans le domaine de
+l'analyse de données avec un focus marketing. Sois direct, pas de phrases
+d'introduction.
+```
+
+Le bouton **↺ Réinitialiser** dans le dialogue de configuration restaure ce prompt.
+
+---
+
+## 💾 Persistance des paramètres
+
+Les paramètres sont stockés dans `~/.voiceapi/settings.json` :
+
+```json
+{
+  "api_key": "AIzaSy...",
+  "cv_path": "/home/user/cv.pdf",
+  "cv_text": "Jean Dupont – Étudiant en Master Data...",
+  "system_prompt": "Tu es un assistant furtif..."
+}
+```
+
+> ⚠️ Ce fichier contient votre clé API en clair. Ne le partagez pas et
+> ne le committez **jamais** dans un dépôt Git.
+> Ajoutez `~/.voiceapi/` ou ce fichier à votre `.gitignore` si nécessaire.
+
+La variable d'environnement `GEMINI_API_KEY`, si définie, prend toujours
+le dessus sur la valeur sauvegardée (pratique pour les environnements CI/CD).
+
+---
+
+## 📦 Distribution (envoyer à des amis)
+
+Ce projet est conçu pour être **distribuable** : aucune configuration
+en ligne de commande n'est requise. Il suffit de :
+
+1. Partager le dossier du projet (ou une archive ZIP).
+2. Le destinataire installe les dépendances :
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Il lance `python main.py` et saisit sa propre clé API dans le dialogue.
+
+### Packaging en exécutable standalone
+
+Pour distribuer sans nécessiter d'installation Python, utilisez **PyInstaller** :
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --windowed \
+    --add-data "requirements.txt:." \
+    main.py
+```
+
+L'exécutable généré se trouve dans `dist/main` (Linux/macOS) ou
+`dist\main.exe` (Windows). Il embarque Python et toutes les dépendances.
+
+> **Note PyInstaller + PyQt6 :** Si l'exécutable ne trouve pas les plugins Qt,
+> ajoutez `--collect-all PyQt6` à la commande PyInstaller.
 
 ---
 
@@ -188,12 +297,14 @@ SYSTEM_PROMPT = (
 
 | Problème | Solution |
 |---|---|
-| `GEMINI_API_KEY not set` | Voir Étape 5 |
+| Dialogue de configuration ne s'ouvre pas | Vérifiez que PyQt6 est installé : `pip install PyQt6` |
 | `soundcard` non disponible | `pip install soundcard` ou utiliser `LOOPBACK_DEVICE` |
+| PDF non lisible | Vérifiez que `pypdf` est installé : `pip install pypdf` |
 | Fenêtre invisible (macOS) | Vérifiez les permissions micro dans *Confidentialité → Micro* |
 | Pas de réponse Gemini | Vérifiez votre connexion internet et la validité de la clé API |
 | `ImportError: PyQt6` | `pip install PyQt6` |
 | `ImportError: qasync` | `pip install qasync` |
+| Clé API refusée (401) | Vérifiez que la clé est valide sur [Google AI Studio](https://aistudio.google.com/app/apikey) |
 
 ---
 
@@ -204,28 +315,27 @@ SYSTEM_PROMPT = (
 - **Historique des réponses :** Sauvegarder automatiquement toutes les réponses Gemini dans un fichier texte ou JSON horodaté, pour pouvoir relire les échanges après l'entretien.
 - **Raccourcis clavier globaux :** Ajouter des raccourcis (ex. `Ctrl+Espace` pour mettre en pause la capture, `Ctrl+C` pour copier la dernière réponse) via `pynput` ou `keyboard`.
 - **Mode "Push-to-Talk" :** Envoyer l'audio uniquement lorsqu'une touche est maintenue enfoncée, pour économiser les tokens API et éviter les faux positifs.
-- **Sélection du périphérique audio :** Ajouter une fenêtre de configuration au démarrage pour choisir le micro et le périphérique loopback parmi les disponibles.
+- **Sélection du périphérique audio :** Ajouter dans le dialogue ⚙ la possibilité de choisir le micro et le périphérique loopback parmi les disponibles.
 - **Support audio multilingue :** Permettre de configurer la langue de l'entretien pour que Gemini réponde dans la même langue que le recruteur.
 - **Réponses audio TTS :** Activer la modalité `AUDIO` en retour de Gemini pour recevoir les suggestions directement dans l'oreillette, sans regarder l'écran.
-- **Thèmes visuels :** Proposer plusieurs thèmes de couleur (clair/sombre/personnalisé) configurables dans `config.py`.
-- **Fenêtre de configuration graphique :** Remplacer les variables d'environnement par un formulaire Qt pour saisir la clé API, choisir les périphériques et modifier le prompt.
+- **Support DOCX :** Ajouter la lecture des fichiers `.docx` (CV Word) via `python-docx`.
+- **Thèmes visuels :** Proposer plusieurs thèmes de couleur (clair/sombre/personnalisé) configurables.
 
 ### Architecture & Robustesse
 
 - **Reconnexion automatique :** Implémenter une logique de retry avec backoff exponentiel si la connexion WebSocket est perdue pendant l'entretien.
 - **Gestion des quotas API :** Détecter les erreurs de quota Gemini (HTTP 429) et afficher un message d'attente au lieu de planter.
-- **Mixage audio intelligent :** Mixer les flux micro et loopback en un seul flux avant envoi (plutôt que deux flux distincts) pour réduire la consommation de tokens.
-- **Détection de silence (VAD) :** Intégrer une détection d'activité vocale (Voice Activity Detection) pour n'envoyer l'audio que lorsque quelqu'un parle, réduisant ainsi les coûts et la latence.
-- **Tests automatisés :** Ajouter des tests unitaires pour `audio_engine.py` (mock sounddevice) et `gemini_client.py` (mock WebSocket), et des tests d'intégration avec un serveur WebSocket local.
-- **Packaging en exécutable :** Utiliser `PyInstaller` ou `cx_Freeze` pour générer un `.exe` (Windows) ou `.app` (macOS) distribuable, sans nécessiter d'installation Python.
-- **Chiffrement de la clé API :** Stocker la clé API chiffrée (avec `keyring` ou `cryptography`) plutôt qu'en variable d'environnement en clair.
-- **Logging structuré :** Remplacer les `print()` par le module `logging` avec rotation de fichiers, pour faciliter le débogage en production.
+- **Mixage audio intelligent :** Mixer les flux micro et loopback en un seul flux avant envoi pour réduire la consommation de tokens.
+- **Détection de silence (VAD) :** Intégrer une détection d'activité vocale pour n'envoyer l'audio que lorsque quelqu'un parle.
+- **Tests automatisés :** Ajouter des tests unitaires pour `audio_engine.py` (mock sounddevice) et `gemini_client.py` (mock WebSocket).
+- **Chiffrement de la clé API :** Stocker la clé API chiffrée (avec `keyring` ou `cryptography`) plutôt qu'en clair dans `settings.json`.
+- **Logging structuré :** Remplacer les `print()` par le module `logging` avec rotation de fichiers.
 
 ### Performance
 
-- **Compression audio :** Encoder l'audio en Opus (via `opuslib`) avant envoi pour réduire la bande passante, si Gemini l'accepte.
+- **Compression audio :** Encoder l'audio en Opus (via `opuslib`) avant envoi pour réduire la bande passante.
 - **Buffer adaptatif :** Ajuster dynamiquement la taille des chunks audio selon la latence réseau mesurée.
-- **Streaming de texte :** Afficher les tokens Gemini mot par mot au fur et à mesure (streaming partiel), pour un rendu encore plus fluide.
+- **Streaming de texte :** Afficher les tokens Gemini mot par mot au fur et à mesure, pour un rendu encore plus fluide.
 
 ---
 

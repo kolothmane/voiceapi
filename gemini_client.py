@@ -3,11 +3,11 @@ gemini_client.py – Client WebSocket pour l'API Gemini Multimodal Live.
 
 Protocole (v1alpha BidiGenerateContent)
 ----------------------------------------
-1. Connexion WebSocket sur GEMINI_WS_URI.
+1. Connexion WebSocket sur l'URI construite depuis la clé API fournie.
 2. Envoi d'un message ``setup`` contenant :
    - le modèle utilisé,
    - les modalités de réponse (TEXT),
-   - le prompt système (instruction stricte).
+   - le prompt système (instruction stricte), enrichi du CV si fourni.
 3. Attente du message ``setupComplete`` du serveur.
 4. En parallèle :
    - Boucle d'envoi  : dépile les chunks base64 de la queue audio et les
@@ -24,7 +24,7 @@ import json
 import websockets
 import websockets.exceptions
 
-from config import GEMINI_MODEL, GEMINI_WS_URI, SAMPLE_RATE, SYSTEM_PROMPT
+from config import GEMINI_MODEL, GEMINI_WS_URI_TEMPLATE, SAMPLE_RATE
 
 
 class GeminiClient:
@@ -39,16 +39,30 @@ class GeminiClient:
     text_callback:
         Fonction (ou coroutine) appelée avec chaque morceau de texte reçu.
         Signature : ``callback(text: str) -> None`` (ou coroutine équivalente).
+    api_key:
+        Clé API Gemini utilisée pour construire l'URI WebSocket.
+    system_prompt:
+        Prompt système envoyé lors du setup initial.  Peut inclure le texte
+        du CV de l'utilisateur pour personnaliser les réponses.
     """
 
     def __init__(
         self,
         audio_queue: "asyncio.Queue[str]",
         text_callback,
+        api_key: str,
+        system_prompt: str = "",
     ) -> None:
         self._audio_queue = audio_queue
         self._text_callback = text_callback
+        self._api_key = api_key
+        self._system_prompt = system_prompt
         self._ws = None
+
+    @property
+    def _ws_uri(self) -> str:
+        """URI WebSocket construite dynamiquement depuis la clé API."""
+        return GEMINI_WS_URI_TEMPLATE.format(api_key=self._api_key)
 
     # ------------------------------------------------------------------
     # Initialisation de la session Gemini
@@ -64,7 +78,7 @@ class GeminiClient:
                     "response_modalities": ["TEXT"],
                 },
                 "system_instruction": {
-                    "parts": [{"text": SYSTEM_PROMPT}]
+                    "parts": [{"text": self._system_prompt}]
                 },
             }
         }
@@ -133,9 +147,9 @@ class GeminiClient:
 
     async def run(self) -> None:
         """Connecte, configure la session, puis lance les deux boucles."""
-        print(f"[Gemini] Connexion à {GEMINI_WS_URI[:60]}…")
+        print(f"[Gemini] Connexion à {self._ws_uri[:60]}…")
         async with websockets.connect(
-            GEMINI_WS_URI,
+            self._ws_uri,
             # Timeout de ping pour détecter les coupures réseau
             ping_interval=20,
             ping_timeout=30,
@@ -159,3 +173,4 @@ class GeminiClient:
             # Propage les éventuelles exceptions
             for task in done:
                 task.result()
+

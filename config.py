@@ -1,40 +1,23 @@
 """
-config.py – Configuration centrale de l'assistant d'entretien.
+config.py – Configuration statique de l'assistant d'entretien.
 
-Toutes les constantes, clés API, et paramètres audio/UI sont regroupées ici
-pour faciliter la personnalisation sans toucher au reste du code.
+Seuls les paramètres qui ne changent pas d'une exécution à l'autre
+(modèle, audio, UI) restent ici.  La clé API, le prompt système et le CV
+sont gérés dynamiquement via ``settings.py``.
 """
-
-import os
 
 # ---------------------------------------------------------------------------
 # Gemini API
 # ---------------------------------------------------------------------------
 
-# Récupère la clé dans la variable d'environnement GEMINI_API_KEY.
-# Sur Windows : set GEMINI_API_KEY=AIza...
-# Sur Linux/macOS : export GEMINI_API_KEY=AIza...
-GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
-
-# URI WebSocket de l'API Gemini Multimodal Live (v1alpha)
-GEMINI_WS_URI: str = (
-    "wss://generativelanguage.googleapis.com/ws/"
-    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
-    f"?key={GEMINI_API_KEY}"
-)
-
 # Modèle Gemini utilisé (doit supporter la modalité audio en temps réel)
 GEMINI_MODEL: str = "models/gemini-2.0-flash-live-001"
 
-# ---------------------------------------------------------------------------
-# Prompt système envoyé à Gemini à la connexion
-# ---------------------------------------------------------------------------
-SYSTEM_PROMPT: str = (
-    "Tu es un assistant furtif. Ton rôle est d'écouter la conversation et de me "
-    "souffler des réponses courtes, percutantes et techniques. L'entretien concerne "
-    "une recherche de stage de 6 mois à partir d'avril 2026, dans le domaine de "
-    "l'analyse de données avec un focus marketing. Sois direct, pas de phrases "
-    "d'introduction."
+# Template d'URI WebSocket – la clé API est injectée au moment de la connexion
+GEMINI_WS_URI_TEMPLATE: str = (
+    "wss://generativelanguage.googleapis.com/ws/"
+    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+    "?key={api_key}"
 )
 
 # ---------------------------------------------------------------------------
