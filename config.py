@@ -16,7 +16,7 @@ GEMINI_MODEL: str = "models/gemini-2.0-flash-live-001"
 # Template d'URI WebSocket – la clé API est injectée au moment de la connexion
 GEMINI_WS_URI_TEMPLATE: str = (
     "wss://generativelanguage.googleapis.com/ws/"
-    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+    "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
     "?key={api_key}"
 )
 
