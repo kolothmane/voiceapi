@@ -1,25 +1,3 @@
-"""
-gemini_client.py – Client WebSocket pour l'API Gemini Multimodal Live.
-
-Protocole (v1alpha BidiGenerateContent)
----------------------------------------
-1. Connexion WebSocket sur l'URI construite depuis la clé API fournie.
-   Les modèles native-audio requièrent le endpoint v1alpha.
-2. Envoi d'un message ``setup`` contenant :
-   - le modèle utilisé,
-   - la modalité de réponse AUDIO (seule valeur valide pour les modèles
-     native-audio ; TEXT dans responseModalities est rejeté avec 1007),
-   - le prompt système (instruction stricte), enrichi du CV si fourni.
-3. Attente du message ``setupComplete`` du serveur.
-4. En parallèle :
-   - Boucle d'envoi  : dépile les chunks base64 de la queue audio et les
-     envoie via ``realtimeInput.audio`` (le champ ``mediaChunks`` est
-     déprécié dans le schéma Live API).
-   - Boucle de réception : lit les messages ``serverContent`` et extrait
-     le texte depuis ``modelTurn.parts[].text`` si présent.
-
-Référence : https://ai.google.dev/api/multimodal-live
-"""
 
 import asyncio
 import base64
