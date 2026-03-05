@@ -104,14 +104,29 @@ class AudioEngine:
 
         Si la porte d'envoi est fermée (Gemini non connecté), le chunk est
         silencieusement ignoré sans incrémenter le compteur de pertes.
-        Si la queue est pleine, le chunk est abandonné avec un log
-        périodique toutes les 100 pertes pour éviter le flood.
+        Si la queue est pleine, le chunk **le plus ancien** est retiré
+        pour faire place au nouveau.  En temps réel, les données audio
+        récentes sont plus utiles que les anciennes.
         """
         if not self._gate.is_set():
             return
         try:
             self._queue.put_nowait(encoded)
         except queue.Full:
+            # Retire le plus ancien chunk pour faire place au nouveau.
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(encoded)
+            except queue.Full:
+                # Rare race condition : le consommateur a vidé le slot
+                # entre get_nowait et put_nowait, mais la queue est de
+                # nouveau pleine.  Le nouveau chunk est perdu.
+                pass
+            # Compteur incrémenté dans tous les cas : même quand le
+            # remplacement réussit, un ancien chunk a été évincé.
             self._dropped_chunks += 1
             if self._dropped_chunks % 100 == 1:
                 print(
