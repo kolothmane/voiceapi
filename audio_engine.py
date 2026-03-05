@@ -1,36 +1,3 @@
-"""
-audio_engine.py – Capture audio asynchrone : microphone + loopback système.
-
-Architecture
-------------
-* Le microphone est capturé via ``sounddevice`` (cross-platform).
-* Le loopback (son des haut-parleurs / de la visio) est capturé via ``soundcard``
-  qui utilise l'API WASAPI en mode loopback sur Windows.
-* Chaque chunk PCM 16-bit est encodé en Base64 puis déposé dans une
-  ``queue.Queue`` thread-safe partagée avec le client WebSocket Gemini.
-* Les captures tournent dans des threads dédiés pour ne pas bloquer la boucle
-  asyncio ni l'UI Qt.
-
-Notes de configuration loopback
---------------------------------
-Windows (recommandé) :
-    soundcard utilise WASAPI loopback automatiquement via
-    ``sc.get_microphone(id=<nom_haut_parleur>, include_loopback=True)``.
-    Aucune configuration système supplémentaire n'est nécessaire.
-
-Linux :
-    PulseAudio/PipeWire crée automatiquement des sources « monitor » pour
-    chaque périphérique de sortie.  Listez-les avec :
-        pactl list short sources | grep monitor
-    Puis définissez la variable d'environnement :
-        export LOOPBACK_DEVICE="alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"
-    sounddevice utilisera ce nom comme périphérique d'entrée.
-
-macOS :
-    Installez un périphérique audio virtuel comme BlackHole (gratuit) ou
-    Soundflower.  Dans Paramètres Système → Son, sélectionnez ce périphérique
-    comme sortie, puis passez son nom dans LOOPBACK_DEVICE.
-"""
 
 import base64
 import os
