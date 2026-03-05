@@ -87,6 +87,12 @@ class AudioEngine:
         self._running = False
         self._threads: list[threading.Thread] = []
         self._dropped_chunks: int = 0  # compteur pour le monitoring
+        # Porte d'envoi : tant qu'elle est fermée (non définie),
+        # les chunks audio sont silencieusement ignorés.
+        # Elle est ouverte par enable_sending() après la configuration
+        # de la session Gemini, ce qui évite de remplir la queue
+        # avec des chunks périmés pendant la phase de connexion.
+        self._gate = threading.Event()
 
     # ------------------------------------------------------------------
     # Utilitaire partagé – injection thread-safe
@@ -95,9 +101,14 @@ class AudioEngine:
     def _safe_enqueue(self, encoded: str) -> None:
         """
         Dépose un chunk base64 dans la queue (thread-safe).
-        Si la queue est pleine, le chunk est silencieusement abandonné
-        (log périodique toutes les 100 pertes pour éviter le flood).
+
+        Si la porte d'envoi est fermée (Gemini non connecté), le chunk est
+        silencieusement ignoré sans incrémenter le compteur de pertes.
+        Si la queue est pleine, le chunk est abandonné avec un log
+        périodique toutes les 100 pertes pour éviter le flood.
         """
+        if not self._gate.is_set():
+            return
         try:
             self._queue.put_nowait(encoded)
         except queue.Full:
@@ -376,6 +387,19 @@ class AudioEngine:
             "  → Linux   : export LOOPBACK_DEVICE=<nom_source_monitor>\n"
             "  → macOS   : installez BlackHole et export LOOPBACK_DEVICE=<nom>"
         )
+
+    # ------------------------------------------------------------------
+    # Contrôle de la porte d'envoi
+    # ------------------------------------------------------------------
+
+    def enable_sending(self) -> None:
+        """Ouvre la porte : les chunks audio seront ajoutés à la queue."""
+        self._dropped_chunks = 0
+        self._gate.set()
+
+    def disable_sending(self) -> None:
+        """Ferme la porte : les chunks audio sont silencieusement ignorés."""
+        self._gate.clear()
 
     # ------------------------------------------------------------------
     # API publique

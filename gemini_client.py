@@ -232,6 +232,15 @@ class GeminiClient:
             self._ws = ws
             await self._send_setup(setup_msg)
 
+            # Vider les éventuels chunks audio accumulés pendant la phase
+            # de connexion / setup pour que la boucle d'envoi démarre
+            # avec une queue vide et ne soit pas ralentie par un backlog.
+            try:
+                while True:
+                    self._audio_queue.get_nowait()
+            except queue.Empty:
+                pass
+
             done, pending = await asyncio.wait(
                 [
                     asyncio.create_task(self._send_audio_loop()),

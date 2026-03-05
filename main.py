@@ -65,6 +65,7 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
         bridge.text_received.emit(text)
 
     def on_connected() -> None:
+        engine.enable_sending()
         bridge.status_changed.emit("🟢 Connecté à Gemini (écoute en cours)")
 
     # --- Prompt système final (prompt personnalisé + CV si présent) ---
@@ -92,6 +93,7 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
                 # Annulation intentionnelle (changement de paramètres)
                 raise
             except Exception as exc:
+                engine.disable_sending()
                 error_msg = f"\n\n⚠️  Erreur Gemini : {exc}"
                 bridge.text_received.emit(error_msg)
                 bridge.status_changed.emit(f"🔁 Reconnexion dans {retry_delay}s…")
