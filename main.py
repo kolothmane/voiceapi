@@ -1,28 +1,3 @@
-"""
-main.py – Point d'entrée de l'assistant d'entretien en temps réel.
-
-Rôle de ce fichier
-------------------
-* Charge les paramètres utilisateur (clé API, CV, prompt) via ``settings.py``.
-* Affiche la boîte de dialogue de configuration au premier lancement
-  (ou si aucune clé API n'est configurée).
-* Initialise l'application Qt.
-* Crée la fenêtre overlay et le bridge asyncio↔Qt.
-* Configure ``qasync`` pour que la boucle asyncio tourne dans le même
-  thread que Qt (pas de multithreading OS supplémentaire nécessaire).
-* Lance les deux tâches asyncio :
-    1. ``audio_engine.start()`` – capture micro + loopback.
-    2. ``gemini_client.run()`` – WebSocket vers Gemini Live.
-* Gère le signal ``restart_requested`` pour relancer la connexion Gemini
-  lorsque l'utilisateur modifie ses paramètres en cours de session.
-
-Séparation des responsabilités
---------------------------------
-Qt (thread principal)  ←→  TextBridge (signaux)  ←→  asyncio (qasync)
-        ↑                                                     ↓
-   OverlayWindow                                     GeminiClient
-   SettingsDialog                                    AudioEngine (threads)
-"""
 
 import asyncio
 import queue
