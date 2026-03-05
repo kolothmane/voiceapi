@@ -9,8 +9,6 @@ Protocole (v1alpha BidiGenerateContent)
    - le modèle utilisé,
    - la modalité de réponse AUDIO (seule valeur valide pour les modèles
      native-audio ; TEXT dans responseModalities est rejeté avec 1007),
-   - ``output_audio_transcription`` pour obtenir la transcription textuelle
-     de la réponse audio du modèle,
    - le prompt système (instruction stricte), enrichi du CV si fourni.
 3. Attente du message ``setupComplete`` du serveur.
 4. En parallèle :
@@ -57,11 +55,13 @@ class GeminiClient:
         text_callback,
         api_key: str,
         system_prompt: str = "",
+        connected_callback=None,
     ) -> None:
         self._audio_queue = audio_queue
         self._text_callback = text_callback
         self._api_key = api_key
         self._system_prompt = system_prompt
+        self._connected_callback = connected_callback
         self._ws = None
 
     @property
@@ -78,20 +78,16 @@ class GeminiClient:
         setup_msg = {
             "setup": {
                 "model": GEMINI_MODEL,
-                "generation_config": {
-                    # Les modèles native-audio (gemini-2.5-flash-native-audio-*)
-                    # n'acceptent que AUDIO comme modalité de réponse.
-                    # Inclure TEXT dans response_modalities provoque une erreur
-                    # 1007 « Request contains an invalid argument ».
-                    # Pour obtenir du texte, on active output_audio_transcription
-                    # qui renvoie la transcription de l'audio généré dans
-                    # serverContent.outputTranscription.text.
-                    "response_modalities": ["AUDIO"],
-                    "output_audio_transcription": {},
+                "generationConfig": {
+                    # Le protocole WebSocket attend des noms JSON en camelCase.
+                    # Avec les modèles native-audio, la modalité de sortie doit
+                    # rester AUDIO.
+                    "responseModalities": ["AUDIO"],
+                    # Active la transcription texte de l'audio généré quand
+                    # elle est supportée par le modèle.
+                    "outputAudioTranscription": {},
                 },
-                "system_instruction": {
-                    "parts": [{"text": self._system_prompt}]
-                },
+                "systemInstruction": {"parts": [{"text": self._system_prompt}]},
             }
         }
         await self._ws.send(json.dumps(setup_msg))
@@ -117,6 +113,11 @@ class GeminiClient:
                 continue  # frame non-JSON → on ignore
             if "setupComplete" in data:
                 print("[Gemini] Session configurée avec succès.")
+                if self._connected_callback:
+                    if asyncio.iscoroutinefunction(self._connected_callback):
+                        await self._connected_callback()
+                    else:
+                        self._connected_callback()
                 return
             # Message JSON non pertinent (ex. serverContent précoce) → on ignore
 
@@ -177,7 +178,7 @@ class GeminiClient:
 
             # --- Source 2 : outputTranscription.text ---
             # Transcription textuelle de l'audio généré par les modèles
-            # native-audio (activée via output_audio_transcription dans le setup).
+            # native-audio (si fournie par l'API sur ce modèle/version).
             output_transcription = server_content.get("outputTranscription", {})
             transcript: str = output_transcription.get("text", "")
             if transcript:
@@ -219,4 +220,3 @@ class GeminiClient:
             # Propage les éventuelles exceptions
             for task in done:
                 task.result()
-
