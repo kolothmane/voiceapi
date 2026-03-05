@@ -160,6 +160,9 @@ class GeminiClient:
 
         loop = asyncio.get_running_loop()
 
+        def _blocking_get() -> str:
+            return self._audio_queue.get(timeout=1.0)
+
         while True:
             # La queue audio est une queue.Queue (thread-safe) et non une
             # asyncio.Queue, car les threads de capture audio y écrivent
@@ -168,7 +171,7 @@ class GeminiClient:
             # propre de la tâche lors d'une reconnexion.
             try:
                 b64_chunk: str = await loop.run_in_executor(
-                    None, lambda: self._audio_queue.get(timeout=1.0)
+                    None, _blocking_get
                 )
             except queue.Empty:
                 continue
