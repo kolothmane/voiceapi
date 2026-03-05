@@ -1,13 +1,4 @@
-"""
-settings.py – Persistance des paramètres utilisateur.
 
-Les paramètres (clé API, texte du CV, prompt système) sont stockés dans un
-fichier JSON dans le répertoire personnel de l'utilisateur afin que
-l'application reste portable et puisse être distribuée sans configuration
-manuelle des variables d'environnement.
-
-Fichier de configuration : ~/.voiceapi/settings.json
-"""
 
 import json
 import os
