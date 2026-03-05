@@ -2,7 +2,7 @@
 gemini_client.py – Client WebSocket pour l'API Gemini Multimodal Live.
 
 Protocole (v1alpha BidiGenerateContent)
-----------------------------------------
+---------------------------------------
 1. Connexion WebSocket sur l'URI construite depuis la clé API fournie.
    Les modèles native-audio requièrent le endpoint v1alpha.
 2. Envoi d'un message ``setup`` contenant :
@@ -45,8 +45,11 @@ class GeminiClient:
     api_key:
         Clé API Gemini utilisée pour construire l'URI WebSocket.
     system_prompt:
-        Prompt système envoyé lors du setup initial.  Peut inclure le texte
+        Prompt système envoyé lors du setup initial. Peut inclure le texte
         du CV de l'utilisateur pour personnaliser les réponses.
+    connected_callback:
+        Fonction (ou coroutine) appelée quand la session est configurée
+        (après réception de setupComplete).
     """
 
     def __init__(
@@ -62,7 +65,7 @@ class GeminiClient:
         self._api_key = api_key
         self._system_prompt = system_prompt
         self._connected_callback = connected_callback
-        self._ws = None
+        self._ws: websockets.WebSocketClientProtocol | None = None
 
     @property
     def _ws_uri(self) -> str:
@@ -75,21 +78,22 @@ class GeminiClient:
 
     def _build_setup_messages(self) -> list[dict]:
         """Construit des variantes de setup pour compatibilité API."""
-        base = {
+        base_setup = {
             "setup": {
                 "model": GEMINI_MODEL,
                 "systemInstruction": {"parts": [{"text": self._system_prompt}]},
             }
         }
+
         # Variante principale : transcription audio activée.
-        with_transcription = json.loads(json.dumps(base))
+        with_transcription = json.loads(json.dumps(base_setup))
         with_transcription["setup"]["generationConfig"] = {
             "responseModalities": ["AUDIO"],
             "outputAudioTranscription": {},
         }
 
         # Fallback : certains déploiements rejettent outputAudioTranscription.
-        without_transcription = json.loads(json.dumps(base))
+        without_transcription = json.loads(json.dumps(base_setup))
         without_transcription["setup"]["generationConfig"] = {
             "responseModalities": ["AUDIO"]
         }
@@ -98,6 +102,9 @@ class GeminiClient:
 
     async def _send_setup(self, setup_msg: dict) -> None:
         """Envoie une configuration initiale et attend setupComplete."""
+        if not self._ws:
+            raise RuntimeError("[Gemini] WebSocket non initialisé.")
+
         await self._ws.send(json.dumps(setup_msg))
 
         deadline = asyncio.get_running_loop().time() + 10
@@ -105,10 +112,11 @@ class GeminiClient:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 raise RuntimeError("[Gemini] Timeout : setupComplete non reçu en 10 s.")
+
             try:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
-            except asyncio.TimeoutError:
-                raise RuntimeError("[Gemini] Timeout : setupComplete non reçu en 10 s.")
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("[Gemini] Timeout : setupComplete non reçu en 10 s.") from exc
 
             try:
                 data = json.loads(raw)
@@ -134,11 +142,13 @@ class GeminiClient:
 
     async def _send_audio_loop(self) -> None:
         """Dépile les chunks audio de la queue et les envoie à Gemini."""
+        if not self._ws:
+            raise RuntimeError("[Gemini] WebSocket non initialisé.")
+
         while True:
             b64_chunk: str = await self._audio_queue.get()
             msg = {
                 "realtimeInput": {
-                    # Format attendu par BidiGenerateContent : tableau de blobs
                     "mediaChunks": [
                         {
                             "mimeType": f"audio/pcm;rate={SAMPLE_RATE}",
@@ -159,24 +169,22 @@ class GeminiClient:
 
     async def _receive_loop(self) -> None:
         """Écoute les messages serveur et extrait les fragments de texte."""
+        if not self._ws:
+            raise RuntimeError("[Gemini] WebSocket non initialisé.")
+
         async for raw in self._ws:
             try:
                 data = json.loads(raw)
             except (json.JSONDecodeError, TypeError, ValueError):
-                # JSONDecodeError : message non-JSON (ex. frame de contrôle)
-                # TypeError / ValueError : frame binaire ou encodage inattendu
                 continue
 
             server_content = data.get("serverContent", {})
 
             # --- Source 1 : modelTurn → parts[].text ---
-            # Présent quand TEXT figure dans responseModalities (modèles non
-            # native-audio) ou si le modèle renvoie du texte inline.
             model_turn = server_content.get("modelTurn", {})
-            parts = model_turn.get("parts", [])
-
+            parts = model_turn.get("parts", []) or []
             for part in parts:
-                text: str = part.get("text", "")
+                text: str = part.get("text", "") or ""
                 if text:
                     if asyncio.iscoroutinefunction(self._text_callback):
                         await self._text_callback(text)
@@ -184,10 +192,8 @@ class GeminiClient:
                         self._text_callback(text)
 
             # --- Source 2 : outputTranscription.text ---
-            # Transcription textuelle de l'audio généré par les modèles
-            # native-audio (si fournie par l'API sur ce modèle/version).
             output_transcription = server_content.get("outputTranscription", {})
-            transcript: str = output_transcription.get("text", "")
+            transcript: str = output_transcription.get("text", "") or ""
             if transcript:
                 if asyncio.iscoroutinefunction(self._text_callback):
                     await self._text_callback(transcript)
@@ -209,7 +215,9 @@ class GeminiClient:
             try:
                 async with websockets.connect(
                     self._ws_uri,
+                    # Gemini Live: désactiver les pings WS pour éviter des déconnexions.
                     ping_interval=None,
+                    # Limite supérieure de la taille des messages WebSocket (100 MB)
                     max_size=100 * 1024 * 1024,
                 ) as ws:
                     self._ws = ws
@@ -222,11 +230,16 @@ class GeminiClient:
                         ],
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+
                     for task in pending:
                         task.cancel()
+
+                    # Propage les éventuelles exceptions
                     for task in done:
                         task.result()
+
                     return
+
             except Exception as exc:
                 setup_errors.append(str(exc))
                 print(f"[Gemini] Variante setup échouée : {exc}")
