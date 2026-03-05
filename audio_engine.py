@@ -283,10 +283,18 @@ class AudioEngine:
                 # recording loop returns to recorder.record() as fast as
                 # possible, reducing WASAPI buffer overflow and the resulting
                 # "data discontinuity" warnings.
-                raw_queue: queue.Queue = queue.Queue(maxsize=64)
+                raw_queue: queue.Queue = queue.Queue(maxsize=128)
                 # Log a discontinuity warning every N occurrences to avoid
                 # flooding the console; still visible but not overwhelming.
                 DISCONTINUITY_LOG_INTERVAL = 20
+                # Number of initial discontinuities to silently ignore.
+                # The first few often fire during recorder warm-up while
+                # the WASAPI buffer is stabilising after open.
+                DISCONTINUITY_GRACE = 5
+                # Number of warm-up reads performed (and discarded) right
+                # after the recorder opens, to let the WASAPI buffer fill
+                # and the audio driver settle before real capture begins.
+                WARMUP_READS = 4
                 # Seconds to wait for the encoder thread to flush and exit.
                 ENCODER_THREAD_SHUTDOWN_TIMEOUT = 1.0
 
@@ -307,7 +315,9 @@ class AudioEngine:
                 # blocksize sets the internal WASAPI buffer size (in frames).
                 # A larger value gives the OS more headroom before flagging a
                 # discontinuity when the Python thread is briefly preempted.
-                recorder_blocksize = CHUNK_SIZE * 4
+                # 8× CHUNK_SIZE ≈ 512 ms @ 16 kHz — enough to absorb brief
+                # GIL pauses and OS scheduling jitter without excessive latency.
+                recorder_blocksize = CHUNK_SIZE * 8
                 _discontinuity_count = 0
                 try:
                     # warnings.catch_warnings() saves and automatically
@@ -329,14 +339,15 @@ class AudioEngine:
                             nonlocal _discontinuity_count
                             if issubclass(cat, sc.SoundcardRuntimeWarning):
                                 _discontinuity_count += 1
-                                if (
-                                    _discontinuity_count
-                                    % DISCONTINUITY_LOG_INTERVAL
-                                    == 1
-                                ):
+                                # Silently ignore the first few discontinuities
+                                # that typically fire during recorder warm-up.
+                                if _discontinuity_count <= DISCONTINUITY_GRACE:
+                                    return
+                                effective = _discontinuity_count - DISCONTINUITY_GRACE
+                                if effective % DISCONTINUITY_LOG_INTERVAL == 1:
                                     print(
                                         f"[Audio/Loopback] data discontinuity "
-                                        f"(×{_discontinuity_count}) – "
+                                        f"(×{effective}) – "
                                         "charge système élevée ou pilote audio lent."
                                     )
                             else:
@@ -353,6 +364,17 @@ class AudioEngine:
                             print(
                                 f"[Audio/Loopback] WASAPI loopback actif sur : {speaker.name}"
                             )
+                            # Warm-up: perform a few silent reads so the
+                            # WASAPI buffer fills and the audio driver
+                            # stabilises before real capture begins.  This
+                            # absorbs the initial discontinuity burst that
+                            # fires while the system is still settling.
+                            for _ in range(WARMUP_READS):
+                                recorder.record(numframes=CHUNK_SIZE)
+                            # Reset the discontinuity counter after warm-up
+                            # so that subsequent logging reflects real issues
+                            # rather than startup artefacts.
+                            _discontinuity_count = 0
                             while self._running:
                                 # recorder.record() returns a float32 array
                                 # normalised to [-1, 1]; no per-call warning

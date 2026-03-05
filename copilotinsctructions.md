@@ -39,3 +39,21 @@ unique contenant `mimeType` et `data`).
 | Fichier | Modification |
 |---------|-------------|
 | `gemini_client.py` | Remplacement de `realtimeInput.mediaChunks` par `realtimeInput.audio`. Les chunks regroupés (batching) sont concaténés en données PCM brutes puis ré-encodés en un seul blob base64 avant envoi. Ajout de `import base64` pour la concaténation. Mise à jour des commentaires et du docstring du module. |
+
+### Fix : « data discontinuity » WASAPI loopback au démarrage (mars 2025)
+
+**Problème** : Au lancement de la capture loopback WASAPI (via `soundcard`),
+un avertissement « data discontinuity (×1) – charge système élevée ou pilote
+audio lent » apparaissait quasi systématiquement.  La cause est un dépassement
+du tampon WASAPI interne : Python n'avait pas le temps de vider le tampon
+assez vite pendant la phase d'initialisation du recorder, quand le système est
+sous charge (GIL, ordonnancement OS, pilote audio).
+
+**Corrections apportées** :
+
+| Fichier | Modification |
+|---------|-------------|
+| `audio_engine.py` | **Buffer élargi** : `recorder_blocksize` passe de `CHUNK_SIZE * 4` (≈ 256 ms) à `CHUNK_SIZE * 8` (≈ 512 ms @ 16 kHz), doublant la marge avant débordement WASAPI. |
+| `audio_engine.py` | **Warm-up drain** : 4 lectures silencieuses (`WARMUP_READS = 4`) juste après l'ouverture du recorder, pour laisser le tampon WASAPI et le pilote audio se stabiliser avant la capture réelle. Le compteur de discontinuités est remis à zéro après le warm-up. |
+| `audio_engine.py` | **Grace period** : les 5 premières discontinuités (`DISCONTINUITY_GRACE = 5`) sont silencieusement ignorées ; seules les discontinuités survenant après la phase de stabilisation sont journalisées (toujours avec throttle ×20). |
+| `audio_engine.py` | **Queue encoder agrandie** : `raw_queue` passe de `maxsize=64` à `maxsize=128` pour absorber les pics de charge sans perdre de trames pendant les courtes pauses du thread encodeur. |
