@@ -87,6 +87,12 @@ class AudioEngine:
         self._running = False
         self._threads: list[threading.Thread] = []
         self._dropped_chunks: int = 0  # compteur pour le monitoring
+        # Porte d'envoi : tant qu'elle est fermée (non définie),
+        # les chunks audio sont silencieusement ignorés.
+        # Elle est ouverte par enable_sending() après la configuration
+        # de la session Gemini, ce qui évite de remplir la queue
+        # avec des chunks périmés pendant la phase de connexion.
+        self._gate = threading.Event()
 
     # ------------------------------------------------------------------
     # Utilitaire partagé – injection thread-safe
@@ -95,12 +101,32 @@ class AudioEngine:
     def _safe_enqueue(self, encoded: str) -> None:
         """
         Dépose un chunk base64 dans la queue (thread-safe).
-        Si la queue est pleine, le chunk est silencieusement abandonné
-        (log périodique toutes les 100 pertes pour éviter le flood).
+
+        Si la porte d'envoi est fermée (Gemini non connecté), le chunk est
+        silencieusement ignoré sans incrémenter le compteur de pertes.
+        Si la queue est pleine, le chunk **le plus ancien** est retiré
+        pour faire place au nouveau.  En temps réel, les données audio
+        récentes sont plus utiles que les anciennes.
         """
+        if not self._gate.is_set():
+            return
         try:
             self._queue.put_nowait(encoded)
         except queue.Full:
+            # Retire le plus ancien chunk pour faire place au nouveau.
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(encoded)
+            except queue.Full:
+                # Rare race condition : le consommateur a vidé le slot
+                # entre get_nowait et put_nowait, mais la queue est de
+                # nouveau pleine.  Le nouveau chunk est perdu.
+                pass
+            # Compteur incrémenté dans tous les cas : même quand le
+            # remplacement réussit, un ancien chunk a été évincé.
             self._dropped_chunks += 1
             if self._dropped_chunks % 100 == 1:
                 print(
@@ -376,6 +402,19 @@ class AudioEngine:
             "  → Linux   : export LOOPBACK_DEVICE=<nom_source_monitor>\n"
             "  → macOS   : installez BlackHole et export LOOPBACK_DEVICE=<nom>"
         )
+
+    # ------------------------------------------------------------------
+    # Contrôle de la porte d'envoi
+    # ------------------------------------------------------------------
+
+    def enable_sending(self) -> None:
+        """Ouvre la porte : les chunks audio seront ajoutés à la queue."""
+        self._dropped_chunks = 0
+        self._gate.set()
+
+    def disable_sending(self) -> None:
+        """Ferme la porte : les chunks audio sont silencieusement ignorés."""
+        self._gate.clear()
 
     # ------------------------------------------------------------------
     # API publique

@@ -29,6 +29,12 @@ import websockets.exceptions
 
 from config import GEMINI_MODEL, GEMINI_WS_URI_TEMPLATE, SAMPLE_RATE
 
+# Nombre maximum de chunks audio regroupés dans un seul message WebSocket.
+# Avec micro + loopback capturant chacun ~16 chunks/s (16 kHz / 1024 frames),
+# un batch de 20 couvre environ 0,6 s d'audio et réduit significativement
+# le nombre de round-trips réseau.
+_MAX_CHUNKS_PER_BATCH: int = 20
+
 
 class GeminiClient:
     """
@@ -159,13 +165,25 @@ class GeminiClient:
             except queue.Empty:
                 continue
 
+            # Regroupe les chunks supplémentaires déjà disponibles dans la
+            # queue pour les envoyer en un seul message WebSocket.  Cela
+            # réduit le nombre de round-trips réseau et permet à la boucle
+            # d'envoi de suivre le rythme de capture (micro + loopback).
+            chunks = [b64_chunk]
+            try:
+                while len(chunks) < _MAX_CHUNKS_PER_BATCH:
+                    chunks.append(self._audio_queue.get_nowait())
+            except queue.Empty:
+                pass
+
             msg = {
                 "realtimeInput": {
                     "mediaChunks": [
                         {
                             "mimeType": f"audio/pcm;rate={SAMPLE_RATE}",
-                            "data": b64_chunk,
+                            "data": c,
                         }
+                        for c in chunks
                     ]
                 }
             }
@@ -231,6 +249,15 @@ class GeminiClient:
         ) as ws:
             self._ws = ws
             await self._send_setup(setup_msg)
+
+            # Vider les éventuels chunks audio accumulés pendant la phase
+            # de connexion / setup pour que la boucle d'envoi démarre
+            # avec une queue vide et ne soit pas ralentie par un backlog.
+            try:
+                while True:
+                    self._audio_queue.get_nowait()
+            except queue.Empty:
+                pass
 
             done, pending = await asyncio.wait(
                 [
