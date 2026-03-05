@@ -22,6 +22,7 @@ Référence : https://ai.google.dev/api/multimodal-live
 
 import asyncio
 import json
+import queue
 
 import websockets
 import websockets.exceptions
@@ -37,7 +38,7 @@ class GeminiClient:
     Parameters
     ----------
     audio_queue:
-        Queue asyncio qui fournit des chaînes base64 (PCM 16-bit, 16 kHz).
+        Queue thread-safe qui fournit des chaînes base64 (PCM 16-bit, 16 kHz).
     text_callback:
         Fonction (ou coroutine) appelée avec chaque morceau de texte reçu.
         Signature : ``callback(text: str) -> None`` (ou coroutine équivalente).
@@ -53,7 +54,7 @@ class GeminiClient:
 
     def __init__(
         self,
-        audio_queue: "asyncio.Queue[str]",
+        audio_queue: "queue.Queue[str]",
         text_callback,
         api_key: str,
         system_prompt: str = "",
@@ -76,17 +77,41 @@ class GeminiClient:
     # ------------------------------------------------------------------
 
     def _build_setup_messages(self) -> list[dict]:
-        """Construit le message de setup pour l'API Gemini Live."""
-        setup = {
+        """
+        Construit les variantes de message de setup pour l'API Gemini Live.
+
+        Retourne plusieurs variantes ordonnées par priorité :
+        1. AUDIO + outputAudioTranscription : le modèle répond en audio et
+           renvoie la transcription texte (idéal pour les modèles native-audio).
+        2. TEXT : le modèle répond directement en texte (fallback pour les
+           modèles qui ne supportent pas outputAudioTranscription).
+        """
+        system_instruction = {"parts": [{"text": self._system_prompt}]}
+
+        # Variante 1 : AUDIO + transcription (modèles native-audio)
+        audio_with_transcription = {
             "setup": {
                 "model": GEMINI_MODEL,
                 "generationConfig": {
                     "responseModalities": ["AUDIO"],
+                    "outputAudioTranscription": {},
                 },
-                "systemInstruction": {"parts": [{"text": self._system_prompt}]},
+                "systemInstruction": system_instruction,
             }
         }
-        return [setup]
+
+        # Variante 2 : TEXT uniquement (modèles non native-audio)
+        text_only = {
+            "setup": {
+                "model": GEMINI_MODEL,
+                "generationConfig": {
+                    "responseModalities": ["TEXT"],
+                },
+                "systemInstruction": system_instruction,
+            }
+        }
+
+        return [audio_with_transcription, text_only]
 
     async def _send_setup(self, setup_msg: dict) -> None:
         """Envoie une configuration initiale et attend setupComplete."""
@@ -133,8 +158,24 @@ class GeminiClient:
         if not self._ws:
             raise RuntimeError("[Gemini] WebSocket non initialisé.")
 
+        loop = asyncio.get_running_loop()
+
+        def _blocking_get() -> str:
+            return self._audio_queue.get(timeout=1.0)
+
         while True:
-            b64_chunk: str = await self._audio_queue.get()
+            # La queue audio est une queue.Queue (thread-safe) et non une
+            # asyncio.Queue, car les threads de capture audio y écrivent
+            # directement. On utilise run_in_executor pour attendre sans
+            # bloquer la boucle asyncio ; le timeout permet l'annulation
+            # propre de la tâche lors d'une reconnexion.
+            try:
+                b64_chunk: str = await loop.run_in_executor(
+                    None, _blocking_get
+                )
+            except queue.Empty:
+                continue
+
             msg = {
                 "realtimeInput": {
                     "mediaChunks": [

@@ -7,7 +7,7 @@ Architecture
 * Le loopback (son des haut-parleurs / de la visio) est capturé via ``soundcard``
   qui utilise l'API WASAPI en mode loopback sur Windows.
 * Chaque chunk PCM 16-bit est encodé en Base64 puis déposé dans une
-  ``asyncio.Queue`` partagée avec le client WebSocket Gemini.
+  ``queue.Queue`` thread-safe partagée avec le client WebSocket Gemini.
 * Les captures tournent dans des threads dédiés pour ne pas bloquer la boucle
   asyncio ni l'UI Qt.
 
@@ -32,7 +32,6 @@ macOS :
     comme sortie, puis passez son nom dans LOOPBACK_DEVICE.
 """
 
-import asyncio
 import base64
 import os
 import queue
@@ -74,7 +73,7 @@ class AudioEngine:
 
     Usage::
 
-        engine = AudioEngine(loop=asyncio.get_event_loop(), audio_queue=queue)
+        engine = AudioEngine(audio_queue=queue)
         engine.start()   # démarre les threads de capture
         # … traitement …
         engine.stop()    # arrête proprement les threads
@@ -82,10 +81,8 @@ class AudioEngine:
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
-        audio_queue: "asyncio.Queue[str]",
+        audio_queue: "queue.Queue[str]",
     ) -> None:
-        self._loop = loop
         self._queue = audio_queue
         self._running = False
         self._threads: list[threading.Thread] = []
@@ -97,13 +94,13 @@ class AudioEngine:
 
     def _safe_enqueue(self, encoded: str) -> None:
         """
-        Dépose un chunk base64 dans la queue depuis le thread asyncio.
+        Dépose un chunk base64 dans la queue (thread-safe).
         Si la queue est pleine, le chunk est silencieusement abandonné
         (log périodique toutes les 100 pertes pour éviter le flood).
         """
         try:
             self._queue.put_nowait(encoded)
-        except asyncio.QueueFull:
+        except queue.Full:
             self._dropped_chunks += 1
             if self._dropped_chunks % 100 == 1:
                 print(
@@ -122,11 +119,7 @@ class AudioEngine:
         # Conversion en PCM int16 puis encodage base64
         pcm_bytes = indata.copy().astype(np.int16).tobytes()
         encoded = base64.b64encode(pcm_bytes).decode("utf-8")
-        # qasync + PyQt6 (notamment sous Python 3.14) peut lever
-        # une erreur de signature quand on passe des *args à
-        # call_soon_threadsafe. On encapsule donc l'appel dans un
-        # callback sans argument.
-        self._loop.call_soon_threadsafe(lambda: self._safe_enqueue(encoded))
+        self._safe_enqueue(encoded)
 
     def _capture_mic(self) -> None:
         """Boucle de capture micro – tourne dans un thread dédié."""
@@ -155,7 +148,7 @@ class AudioEngine:
         else:
             pcm_bytes = indata.copy().astype(np.int16).tobytes()
         encoded = base64.b64encode(pcm_bytes).decode("utf-8")
-        self._loop.call_soon_threadsafe(lambda: self._safe_enqueue(encoded))
+        self._safe_enqueue(encoded)
 
     def _capture_windows_loopback_sounddevice(self) -> bool:
         """
@@ -278,11 +271,7 @@ class AudioEngine:
                             break
                         pcm = (np.clip(item, -1.0, 1.0) * 32767).astype(np.int16)
                         enc = base64.b64encode(pcm.tobytes()).decode("utf-8")
-                        # Use a default-argument capture to avoid the classic
-                        # late-binding lambda closure bug.
-                        self._loop.call_soon_threadsafe(
-                            lambda e=enc: self._safe_enqueue(e)
-                        )
+                        self._safe_enqueue(enc)
 
                 enc_thread = threading.Thread(
                     target=_encoder_worker, name="loopback-encoder", daemon=True
