@@ -13,7 +13,8 @@ Protocole (v1alpha BidiGenerateContent)
 3. Attente du message ``setupComplete`` du serveur.
 4. En parallèle :
    - Boucle d'envoi  : dépile les chunks base64 de la queue audio et les
-     envoie via ``realtimeInput.mediaChunks``.
+     envoie via ``realtimeInput.audio`` (le champ ``mediaChunks`` est
+     déprécié dans le schéma Live API).
    - Boucle de réception : lit les messages ``serverContent`` et extrait
      le texte depuis ``modelTurn.parts[].text`` si présent.
 
@@ -21,6 +22,7 @@ Référence : https://ai.google.dev/api/multimodal-live
 """
 
 import asyncio
+import base64
 import json
 import queue
 
@@ -32,7 +34,8 @@ from config import GEMINI_MODEL, GEMINI_WS_URI_TEMPLATE, SAMPLE_RATE
 # Nombre maximum de chunks audio regroupés dans un seul message WebSocket.
 # Avec micro + loopback capturant chacun ~16 chunks/s (16 kHz / 1024 frames),
 # un batch de 20 couvre environ 0,6 s d'audio et réduit significativement
-# le nombre de round-trips réseau.
+# le nombre de round-trips réseau.  Les données PCM brutes sont concaténées
+# puis encodées en un seul blob base64 envoyé dans ``realtimeInput.audio``.
 _MAX_CHUNKS_PER_BATCH: int = 20
 
 
@@ -176,15 +179,17 @@ class GeminiClient:
             except queue.Empty:
                 pass
 
+            # Concatène les données PCM brutes des chunks regroupés puis
+            # ré-encode le tout en un seul blob base64.  Le champ ``audio``
+            # remplace l'ancien ``mediaChunks`` (déprécié dans le schéma
+            # Live API) et attend un objet unique, pas un tableau.
+            raw_pcm = b"".join(base64.b64decode(c) for c in chunks)
             msg = {
                 "realtimeInput": {
-                    "mediaChunks": [
-                        {
-                            "mimeType": f"audio/pcm;rate={SAMPLE_RATE}",
-                            "data": c,
-                        }
-                        for c in chunks
-                    ]
+                    "audio": {
+                        "mimeType": f"audio/pcm;rate={SAMPLE_RATE}",
+                        "data": base64.b64encode(raw_pcm).decode("utf-8"),
+                    }
                 }
             }
             try:
