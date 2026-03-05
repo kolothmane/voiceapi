@@ -58,13 +58,12 @@ if not _FROMSTRING_PATCHED:
     np.fromstring = _compat_fromstring
     _FROMSTRING_PATCHED = True
 
+_SOUNDCARD_AVAILABLE = False
 try:
     import soundcard as sc  # noqa: F401
+    _SOUNDCARD_AVAILABLE = True
 except Exception:  # ImportError ou OSError si pas de WASAPI
     pass
-# Correctif forcé : désactivation de soundcard pour forcer le fallback WASAPI de
-# sounddevice et éviter l'erreur "SoundcardRuntimeWarning: data discontinuity in recording".
-_SOUNDCARD_AVAILABLE = False
 
 from config import AUDIO_FORMAT, CHANNELS, CHUNK_SIZE, SAMPLE_RATE
 
@@ -145,13 +144,32 @@ class AudioEngine:
     # Loopback système (soundcard / WASAPI)
     # ------------------------------------------------------------------
 
+    def _loopback_callback(self, indata: np.ndarray, frames: int, time, status) -> None:
+        """Callback dédié au flux loopback sounddevice (float32 ou int16)."""
+        if status:
+            print(f"[Audio/Loopback] {status}")
+        # WASAPI loopback renvoie souvent du float32 même si on demande int16 ;
+        # on normalise explicitement pour les deux cas.
+        if indata.dtype == np.float32:
+            pcm_bytes = (np.clip(indata, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        else:
+            pcm_bytes = indata.copy().astype(np.int16).tobytes()
+        encoded = base64.b64encode(pcm_bytes).decode("utf-8")
+        self._loop.call_soon_threadsafe(lambda: self._safe_enqueue(encoded))
+
     def _capture_windows_loopback_sounddevice(self) -> bool:
         """
         Fallback Windows : capture loopback via sounddevice/WASAPI.
 
-        Utile quand la lib soundcard casse avec NumPy>=2 (erreur fromstring).
+        Utile quand la lib soundcard n'est pas disponible.
         Retourne True si la capture a démarré et s'est terminée proprement,
         False si aucun périphérique loopback WASAPI n'a pu être ouvert.
+
+        Ordre de priorité :
+        1. Périphériques d'entrée dont le nom contient « loopback » (certains
+           pilotes WASAPI les exposent directement comme source d'entrée).
+        2. Périphérique de sortie par défaut du système.
+        3. Tous les autres périphériques de sortie.
         """
         if not sys.platform.startswith("win"):
             return False
@@ -166,30 +184,61 @@ class AudioEngine:
             print(f"[Audio/Loopback] Impossible de lister les périphériques WASAPI : {exc}")
             return False
 
-        # On tente les périphériques de sortie : en WASAPI loopback, on ouvre
-        # un flux d'entrée branché sur la sortie choisie.
+        # Identifie le périphérique de sortie par défaut (peut être None).
+        try:
+            default_out_idx = sd.default.device[1]
+        except Exception:
+            default_out_idx = None
+
+        # Construit la liste ordonnée : loopback-nommés → sortie défaut → autres sorties.
+        loopback_named: list[tuple[int, dict]] = []
+        default_out: list[tuple[int, dict]] = []
+        other_out: list[tuple[int, dict]] = []
+
         for device_id, dev in enumerate(devices):
-            if dev.get("max_output_channels", 0) < 1:
-                continue
-            try:
-                with sd.InputStream(
-                    device=device_id,
-                    samplerate=SAMPLE_RATE,
-                    channels=CHANNELS,
-                    dtype=AUDIO_FORMAT,
-                    blocksize=CHUNK_SIZE,
-                    callback=self._mic_callback,
-                    extra_settings=wasapi_settings(loopback=True),
-                ):
-                    print(
-                        "[Audio/Loopback] WASAPI loopback via sounddevice actif sur : "
-                        f"{dev.get('name', device_id)}"
-                    )
-                    while self._running:
-                        sd.sleep(100)
-                return True
-            except Exception:
-                continue
+            name_lower = dev.get("name", "").lower()
+            if "loopback" in name_lower and dev.get("max_input_channels", 0) >= 1:
+                loopback_named.append((device_id, dev))
+            elif dev.get("max_output_channels", 0) >= 1:
+                if device_id == default_out_idx:
+                    default_out.append((device_id, dev))
+                else:
+                    other_out.append((device_id, dev))
+
+        candidates = loopback_named + default_out + other_out
+
+        for device_id, dev in candidates:
+            is_loopback_named = "loopback" in dev.get("name", "").lower()
+            # Les périphériques loopback-nommés sont déjà des sources d'entrée ;
+            # on les ouvre sans WasapiSettings(loopback=True).
+            open_kwargs: dict = dict(
+                device=device_id,
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                blocksize=CHUNK_SIZE,
+                callback=self._loopback_callback,
+            )
+            if not is_loopback_named:
+                open_kwargs["extra_settings"] = wasapi_settings(loopback=True)
+
+            # Essaie float32 en priorité (format natif WASAPI loopback), puis
+            # AUDIO_FORMAT si différent (evite de tenter deux fois le même type).
+            dtypes_to_try = ["float32"]
+            if AUDIO_FORMAT != "float32":
+                dtypes_to_try.append(AUDIO_FORMAT)
+            for dtype in dtypes_to_try:
+                open_kwargs["dtype"] = dtype
+                try:
+                    with sd.InputStream(**open_kwargs):
+                        print(
+                            "[Audio/Loopback] WASAPI loopback via sounddevice actif sur : "
+                            f"{dev.get('name', device_id)}"
+                        )
+                        while self._running:
+                            sd.sleep(100)
+                    return True
+                except Exception:
+                    continue
 
         return False
 
@@ -227,7 +276,7 @@ class AudioEngine:
                         item = raw_queue.get()
                         if item is None:
                             break
-                        pcm = (item * 32767).astype(np.int16)
+                        pcm = (np.clip(item, -1.0, 1.0) * 32767).astype(np.int16)
                         enc = base64.b64encode(pcm.tobytes()).decode("utf-8")
                         # Use a default-argument capture to avoid the classic
                         # late-binding lambda closure bug.
