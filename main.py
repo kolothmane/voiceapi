@@ -25,6 +25,7 @@ Qt (thread principal)  ←→  TextBridge (signaux)  ←→  asyncio (qasync)
 """
 
 import asyncio
+import queue
 import sys
 
 import qasync
@@ -50,12 +51,13 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
 
     # Queue FIFO bornée pour éviter une accumulation infinie de chunks
     # si le réseau est plus lent que la capture audio.
-    audio_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=300)
-
-    loop = asyncio.get_event_loop()
+    # On utilise queue.Queue (thread-safe) plutôt que asyncio.Queue car les
+    # threads de capture audio y écrivent directement, sans passer par
+    # call_soon_threadsafe (incompatible qasync + Python 3.14).
+    audio_queue: queue.Queue[str] = queue.Queue(maxsize=300)
 
     # --- Moteur audio ---
-    engine = AudioEngine(loop=loop, audio_queue=audio_queue)
+    engine = AudioEngine(audio_queue=audio_queue)
     engine.start()
 
     # --- Callback texte : émettre un signal Qt (thread-safe) ---
