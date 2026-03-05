@@ -15,8 +15,7 @@ Protocole (v1alpha BidiGenerateContent)
    - Boucle d'envoi  : dépile les chunks base64 de la queue audio et les
      envoie via ``realtimeInput.mediaChunks``.
    - Boucle de réception : lit les messages ``serverContent`` et extrait
-     le texte depuis ``outputTranscription.text`` (transcription de l'audio
-     généré) ainsi que depuis ``modelTurn.parts[].text`` si présent.
+     le texte depuis ``modelTurn.parts[].text`` si présent.
 
 Référence : https://ai.google.dev/api/multimodal-live
 """
@@ -77,28 +76,17 @@ class GeminiClient:
     # ------------------------------------------------------------------
 
     def _build_setup_messages(self) -> list[dict]:
-        """Construit des variantes de setup pour compatibilité API."""
-        base_setup = {
+        """Construit le message de setup pour l'API Gemini Live."""
+        setup = {
             "setup": {
                 "model": GEMINI_MODEL,
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                },
                 "systemInstruction": {"parts": [{"text": self._system_prompt}]},
             }
         }
-
-        # Variante principale : transcription audio activée.
-        with_transcription = json.loads(json.dumps(base_setup))
-        with_transcription["setup"]["generationConfig"] = {
-            "responseModalities": ["AUDIO"],
-            "outputAudioTranscription": {},
-        }
-
-        # Fallback : certains déploiements rejettent outputAudioTranscription.
-        without_transcription = json.loads(json.dumps(base_setup))
-        without_transcription["setup"]["generationConfig"] = {
-            "responseModalities": ["AUDIO"]
-        }
-
-        return [with_transcription, without_transcription]
+        return [setup]
 
     async def _send_setup(self, setup_msg: dict) -> None:
         """Envoie une configuration initiale et attend setupComplete."""

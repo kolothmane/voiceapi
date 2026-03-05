@@ -41,6 +41,21 @@ import threading
 import numpy as np
 import sounddevice as sd
 
+# Compatibilité NumPy 2.x : le mode binaire de numpy.fromstring a été supprimé.
+# soundcard utilise encore fromstring(buffer, dtype=…) ; on redirige vers frombuffer.
+_FROMSTRING_PATCHED = False
+if not _FROMSTRING_PATCHED:
+    _orig_fromstring = np.fromstring
+
+    def _compat_fromstring(string, dtype=float, count=-1, sep=""):
+        if sep == "":
+            # binary mode: frombuffer is the direct replacement; 'offset' defaults to 0
+            return np.frombuffer(string, dtype=dtype, count=count)
+        return _orig_fromstring(string, dtype=dtype, count=count, sep=sep)
+
+    np.fromstring = _compat_fromstring
+    _FROMSTRING_PATCHED = True
+
 try:
     import soundcard as sc
 
