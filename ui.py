@@ -1,18 +1,4 @@
-"""
-ui.py – Interface graphique PyQt6 de l'assistant d'entretien.
 
-Composants
-----------
-* ``TextBridge``     – pont thread-safe asyncio → Qt (signaux).
-* ``SettingsDialog`` – boîte de dialogue de configuration (clé API, CV, prompt).
-* ``OverlayWindow``  – fenêtre overlay sans bordures, always-on-top, déplaçable.
-
-Thread safety
--------------
-La classe ``TextBridge`` utilise des signaux Qt pour transmettre les données
-depuis la boucle asyncio vers le thread principal Qt.
-Émettre un signal Qt est toujours thread-safe.
-"""
 
 import sys
 from pathlib import Path
