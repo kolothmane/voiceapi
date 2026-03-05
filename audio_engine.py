@@ -59,11 +59,12 @@ if not _FROMSTRING_PATCHED:
     _FROMSTRING_PATCHED = True
 
 try:
-    import soundcard as sc
-
-    _SOUNDCARD_AVAILABLE = True
+    import soundcard as sc  # noqa: F401
 except Exception:  # ImportError ou OSError si pas de WASAPI
-    _SOUNDCARD_AVAILABLE = False
+    pass
+# Correctif forcé : désactivation de soundcard pour forcer le fallback WASAPI de
+# sounddevice et éviter l'erreur "SoundcardRuntimeWarning: data discontinuity in recording".
+_SOUNDCARD_AVAILABLE = False
 
 from config import AUDIO_FORMAT, CHANNELS, CHUNK_SIZE, SAMPLE_RATE
 
