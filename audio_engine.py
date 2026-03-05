@@ -243,15 +243,43 @@ class AudioEngine:
                 # A larger value gives the OS more headroom before flagging a
                 # discontinuity when the Python thread is briefly preempted.
                 recorder_blocksize = CHUNK_SIZE * 4
+                _discontinuity_count = 0
                 try:
+                    # warnings.catch_warnings() saves and automatically
+                    # restores warnings.showwarning (and the filter list) on
+                    # exit — even if an exception is raised — so no explicit
+                    # finally-restore is needed.
                     with warnings.catch_warnings():
-                        # Convert repeated SoundcardRuntimeWarning floods into
-                        # a single throttled log entry instead of spamming the
-                        # console for every chunk that experiences a gap.
-                        warnings.filterwarnings(
-                            "always",
-                            category=sc.SoundcardRuntimeWarning,
-                        )
+                        # Replace showwarning once for the entire recording
+                        # session instead of wrapping every recorder.record()
+                        # call in catch_warnings(record=True).  Removing that
+                        # per-iteration context-manager overhead keeps the
+                        # tight loop fast enough to prevent WASAPI buffer
+                        # overflows that trigger "data discontinuity".
+                        _original_showwarning = warnings.showwarning
+
+                        def _discontinuity_handler(
+                            msg, cat, fn, ln, file=None, line=None
+                        ):
+                            nonlocal _discontinuity_count
+                            if issubclass(cat, sc.SoundcardRuntimeWarning):
+                                _discontinuity_count += 1
+                                if (
+                                    _discontinuity_count
+                                    % DISCONTINUITY_LOG_INTERVAL
+                                    == 1
+                                ):
+                                    print(
+                                        f"[Audio/Loopback] data discontinuity "
+                                        f"(×{_discontinuity_count}) – "
+                                        "charge système élevée ou pilote audio lent."
+                                    )
+                            else:
+                                _original_showwarning(msg, cat, fn, ln, file, line)
+
+                        warnings.showwarning = _discontinuity_handler
+                        warnings.simplefilter("always", sc.SoundcardRuntimeWarning)
+
                         with loopback_mic.recorder(
                             samplerate=SAMPLE_RATE,
                             channels=CHANNELS,
@@ -260,23 +288,11 @@ class AudioEngine:
                             print(
                                 f"[Audio/Loopback] WASAPI loopback actif sur : {speaker.name}"
                             )
-                            _discontinuity_count = 0
                             while self._running:
-                                # recorder.record() retourne un tableau float32 normalisé [-1, 1]
-                                with warnings.catch_warnings(record=True) as caught:
-                                    warnings.simplefilter("always")
-                                    data = recorder.record(numframes=CHUNK_SIZE)
-                                for w in caught:
-                                    if issubclass(
-                                        w.category, sc.SoundcardRuntimeWarning
-                                    ):
-                                        _discontinuity_count += 1
-                                        if _discontinuity_count % DISCONTINUITY_LOG_INTERVAL == 1:
-                                            print(
-                                                f"[Audio/Loopback] data discontinuity "
-                                                f"(×{_discontinuity_count}) – "
-                                                "charge système élevée ou pilote audio lent."
-                                            )
+                                # recorder.record() returns a float32 array
+                                # normalised to [-1, 1]; no per-call warning
+                                # context manager needed any more.
+                                data = recorder.record(numframes=CHUNK_SIZE)
                                 try:
                                     raw_queue.put_nowait(data)
                                 except queue.Full:
