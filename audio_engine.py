@@ -35,8 +35,10 @@ macOS :
 import asyncio
 import base64
 import os
+import queue
 import sys
 import threading
+import warnings
 
 import numpy as np
 import sounddevice as sd
@@ -207,20 +209,81 @@ class AudioEngine:
                 loopback_mic = sc.get_microphone(
                     id=str(speaker.name), include_loopback=True
                 )
-                with loopback_mic.recorder(
-                    samplerate=SAMPLE_RATE, channels=CHANNELS
-                ) as recorder:
-                    print(
-                        f"[Audio/Loopback] WASAPI loopback actif sur : {speaker.name}"
-                    )
-                    while self._running:
-                        # recorder.record() retourne un tableau float32 normalisé [-1, 1]
-                        data = recorder.record(numframes=CHUNK_SIZE)
-                        pcm = (data * 32767).astype(np.int16)
-                        encoded = base64.b64encode(pcm.tobytes()).decode("utf-8")
+
+                # Offload encoding to a dedicated worker thread so that the
+                # recording loop returns to recorder.record() as fast as
+                # possible, reducing WASAPI buffer overflow and the resulting
+                # "data discontinuity" warnings.
+                raw_queue: queue.Queue = queue.Queue(maxsize=64)
+                # Log a discontinuity warning every N occurrences to avoid
+                # flooding the console; still visible but not overwhelming.
+                DISCONTINUITY_LOG_INTERVAL = 20
+                # Seconds to wait for the encoder thread to flush and exit.
+                ENCODER_THREAD_SHUTDOWN_TIMEOUT = 1.0
+
+                def _encoder_worker() -> None:
+                    while True:
+                        item = raw_queue.get()
+                        if item is None:
+                            break
+                        pcm = (item * 32767).astype(np.int16)
+                        enc = base64.b64encode(pcm.tobytes()).decode("utf-8")
+                        # Use a default-argument capture to avoid the classic
+                        # late-binding lambda closure bug.
                         self._loop.call_soon_threadsafe(
-                            lambda: self._safe_enqueue(encoded)
+                            lambda e=enc: self._safe_enqueue(e)
                         )
+
+                enc_thread = threading.Thread(
+                    target=_encoder_worker, name="loopback-encoder", daemon=True
+                )
+                enc_thread.start()
+
+                # blocksize sets the internal WASAPI buffer size (in frames).
+                # A larger value gives the OS more headroom before flagging a
+                # discontinuity when the Python thread is briefly preempted.
+                recorder_blocksize = CHUNK_SIZE * 4
+                try:
+                    with warnings.catch_warnings():
+                        # Convert repeated SoundcardRuntimeWarning floods into
+                        # a single throttled log entry instead of spamming the
+                        # console for every chunk that experiences a gap.
+                        warnings.filterwarnings(
+                            "always",
+                            category=sc.SoundcardRuntimeWarning,
+                        )
+                        with loopback_mic.recorder(
+                            samplerate=SAMPLE_RATE,
+                            channels=CHANNELS,
+                            blocksize=recorder_blocksize,
+                        ) as recorder:
+                            print(
+                                f"[Audio/Loopback] WASAPI loopback actif sur : {speaker.name}"
+                            )
+                            _discontinuity_count = 0
+                            while self._running:
+                                # recorder.record() retourne un tableau float32 normalisé [-1, 1]
+                                with warnings.catch_warnings(record=True) as caught:
+                                    warnings.simplefilter("always")
+                                    data = recorder.record(numframes=CHUNK_SIZE)
+                                for w in caught:
+                                    if issubclass(
+                                        w.category, sc.SoundcardRuntimeWarning
+                                    ):
+                                        _discontinuity_count += 1
+                                        if _discontinuity_count % DISCONTINUITY_LOG_INTERVAL == 1:
+                                            print(
+                                                f"[Audio/Loopback] data discontinuity "
+                                                f"(×{_discontinuity_count}) – "
+                                                "charge système élevée ou pilote audio lent."
+                                            )
+                                try:
+                                    raw_queue.put_nowait(data)
+                                except queue.Full:
+                                    pass  # drop frame; encoder is falling behind
+                finally:
+                    raw_queue.put(None)  # stop encoder thread
+                    enc_thread.join(timeout=ENCODER_THREAD_SHUTDOWN_TIMEOUT)
                 return  # succès → on ne passe pas aux alternatives
             except Exception as exc:
                 print(
