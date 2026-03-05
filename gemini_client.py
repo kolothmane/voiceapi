@@ -76,42 +76,25 @@ class GeminiClient:
     # Initialisation de la session Gemini
     # ------------------------------------------------------------------
 
-    def _build_setup_messages(self) -> list[dict]:
+    def _build_setup_message(self) -> dict:
         """
-        Construit les variantes de message de setup pour l'API Gemini Live.
+        Construit le message de setup pour l'API Gemini Live.
 
-        Retourne plusieurs variantes ordonnées par priorité :
-        1. AUDIO + outputAudioTranscription : le modèle répond en audio et
-           renvoie la transcription texte (idéal pour les modèles native-audio).
-        2. TEXT : le modèle répond directement en texte (fallback pour les
-           modèles qui ne supportent pas outputAudioTranscription).
+        Le modèle native-audio (gemini-2.5-flash-native-audio-*) n'accepte que
+        ``responseModalities: ["AUDIO"]``.  ``outputAudioTranscription`` n'est
+        pas un champ reconnu par le endpoint v1alpha et provoque une erreur 1007.
         """
         system_instruction = {"parts": [{"text": self._system_prompt}]}
 
-        # Variante 1 : AUDIO + transcription (modèles native-audio)
-        audio_with_transcription = {
+        return {
             "setup": {
                 "model": GEMINI_MODEL,
                 "generationConfig": {
                     "responseModalities": ["AUDIO"],
-                    "outputAudioTranscription": {},
                 },
                 "systemInstruction": system_instruction,
             }
         }
-
-        # Variante 2 : TEXT uniquement (modèles non native-audio)
-        text_only = {
-            "setup": {
-                "model": GEMINI_MODEL,
-                "generationConfig": {
-                    "responseModalities": ["TEXT"],
-                },
-                "systemInstruction": system_instruction,
-            }
-        }
-
-        return [audio_with_transcription, text_only]
 
     async def _send_setup(self, setup_msg: dict) -> None:
         """Envoie une configuration initiale et attend setupComplete."""
@@ -237,40 +220,29 @@ class GeminiClient:
         """Connecte, configure la session, puis lance les deux boucles."""
         print(f"[Gemini] Connexion à {self._ws_uri[:60]}…")
 
-        setup_errors: list[str] = []
-        setup_messages = self._build_setup_messages()
+        setup_msg = self._build_setup_message()
 
-        for setup_msg in setup_messages:
-            try:
-                async with websockets.connect(
-                    self._ws_uri,
-                    # Gemini Live: désactiver les pings WS pour éviter des déconnexions.
-                    ping_interval=None,
-                    # Limite supérieure de la taille des messages WebSocket (100 MB)
-                    max_size=100 * 1024 * 1024,
-                ) as ws:
-                    self._ws = ws
-                    await self._send_setup(setup_msg)
+        async with websockets.connect(
+            self._ws_uri,
+            # Gemini Live: désactiver les pings WS pour éviter des déconnexions.
+            ping_interval=None,
+            # Limite supérieure de la taille des messages WebSocket (100 MB)
+            max_size=100 * 1024 * 1024,
+        ) as ws:
+            self._ws = ws
+            await self._send_setup(setup_msg)
 
-                    done, pending = await asyncio.wait(
-                        [
-                            asyncio.create_task(self._send_audio_loop()),
-                            asyncio.create_task(self._receive_loop()),
-                        ],
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
+            done, pending = await asyncio.wait(
+                [
+                    asyncio.create_task(self._send_audio_loop()),
+                    asyncio.create_task(self._receive_loop()),
+                ],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
-                    for task in pending:
-                        task.cancel()
+            for task in pending:
+                task.cancel()
 
-                    # Propage les éventuelles exceptions
-                    for task in done:
-                        task.result()
-
-                    return
-
-            except Exception as exc:
-                setup_errors.append(str(exc))
-                print(f"[Gemini] Variante setup échouée : {exc}")
-
-        raise RuntimeError(" | ".join(setup_errors) or "[Gemini] Échec de setup")
+            # Propage les éventuelles exceptions
+            for task in done:
+                task.result()
