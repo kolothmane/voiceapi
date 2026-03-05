@@ -35,6 +35,7 @@ macOS :
 import asyncio
 import base64
 import os
+import sys
 import threading
 
 import numpy as np
@@ -126,6 +127,54 @@ class AudioEngine:
     # Loopback système (soundcard / WASAPI)
     # ------------------------------------------------------------------
 
+    def _capture_windows_loopback_sounddevice(self) -> bool:
+        """
+        Fallback Windows : capture loopback via sounddevice/WASAPI.
+
+        Utile quand la lib soundcard casse avec NumPy>=2 (erreur fromstring).
+        Retourne True si la capture a démarré et s'est terminée proprement,
+        False si aucun périphérique loopback WASAPI n'a pu être ouvert.
+        """
+        if not sys.platform.startswith("win"):
+            return False
+
+        wasapi_settings = getattr(sd, "WasapiSettings", None)
+        if wasapi_settings is None:
+            return False
+
+        try:
+            devices = sd.query_devices()
+        except Exception as exc:
+            print(f"[Audio/Loopback] Impossible de lister les périphériques WASAPI : {exc}")
+            return False
+
+        # On tente les périphériques de sortie : en WASAPI loopback, on ouvre
+        # un flux d'entrée branché sur la sortie choisie.
+        for device_id, dev in enumerate(devices):
+            if dev.get("max_output_channels", 0) < 1:
+                continue
+            try:
+                with sd.InputStream(
+                    device=device_id,
+                    samplerate=SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype=AUDIO_FORMAT,
+                    blocksize=CHUNK_SIZE,
+                    callback=self._mic_callback,
+                    extra_settings=wasapi_settings(loopback=True),
+                ):
+                    print(
+                        "[Audio/Loopback] WASAPI loopback via sounddevice actif sur : "
+                        f"{dev.get('name', device_id)}"
+                    )
+                    while self._running:
+                        sd.sleep(100)
+                return True
+            except Exception:
+                continue
+
+        return False
+
     def _capture_loopback(self) -> None:
         """
         Capture le son sortant des haut-parleurs (loopback).
@@ -161,10 +210,14 @@ class AudioEngine:
             except Exception as exc:
                 print(
                     f"[Audio/Loopback] soundcard échoue ({exc}). "
-                    "Tentative avec LOOPBACK_DEVICE…"
+                    "Tentative WASAPI sounddevice puis LOOPBACK_DEVICE…"
                 )
 
-        # --- Tentative 2 : sounddevice + LOOPBACK_DEVICE (Linux/macOS) ---
+        # --- Tentative 2 : fallback Windows sounddevice/WASAPI loopback ---
+        if self._capture_windows_loopback_sounddevice():
+            return
+
+        # --- Tentative 3 : sounddevice + LOOPBACK_DEVICE (Linux/macOS) ---
         loopback_device = os.environ.get("LOOPBACK_DEVICE")
         if loopback_device:
             try:
