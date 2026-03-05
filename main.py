@@ -90,13 +90,14 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
                 bridge.text_received.emit(error_msg)
                 bridge.status_changed.emit(f"🔁 Reconnexion dans {retry_delay}s…")
                 print(f"[Main] {error_msg}")
-                await asyncio.sleep(retry_delay)
-                # Vider l'audio en attente pour éviter d'envoyer de vieux chunks
+                # Vider immédiatement la queue pour éviter l'accumulation
+                # de vieux chunks pendant la période hors-ligne.
                 while not audio_queue.empty():
                     try:
                         audio_queue.get_nowait()
                     except Exception:
                         break
+                await asyncio.sleep(retry_delay)
                 # Backoff exponentiel plafonné à 60 s
                 retry_delay = min(retry_delay * 2, 60)
     finally:

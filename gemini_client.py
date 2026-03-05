@@ -7,7 +7,7 @@ Protocole (v1alpha BidiGenerateContent)
    Les modèles native-audio requièrent le endpoint v1alpha.
 2. Envoi d'un message ``setup`` contenant :
    - le modèle utilisé,
-   - les modalités de réponse (TEXT),
+   - les modalités de réponse (AUDIO + TEXT),
    - le prompt système (instruction stricte), enrichi du CV si fourni.
 3. Attente du message ``setupComplete`` du serveur.
 4. En parallèle :
@@ -75,8 +75,9 @@ class GeminiClient:
             "setup": {
                 "model": GEMINI_MODEL,
                 "generation_config": {
-                    # On ne veut que du texte en retour (pas d'audio TTS)
-                    "response_modalities": ["TEXT"],
+                    # Les modèles native-audio requièrent AUDIO dans les modalités ;
+                    # on conserve TEXT pour afficher uniquement le texte dans l'UI.
+                    "response_modalities": ["AUDIO", "TEXT"],
                 },
                 "system_instruction": {
                     "parts": [{"text": self._system_prompt}]
@@ -85,14 +86,29 @@ class GeminiClient:
         }
         await self._ws.send(json.dumps(setup_msg))
 
-        # Le serveur répond d'abord par un message setupComplete
-        raw = await self._ws.recv()
-        data = json.loads(raw)
-        if "setupComplete" not in data:
-            raise RuntimeError(
-                f"[Gemini] Réponse inattendue au setup : {data}"
-            )
-        print("[Gemini] Session configurée avec succès.")
+        # Attente de setupComplete avec un délai maximal de 10 s.
+        # On ignore les frames non-JSON et les messages non pertinents.
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    "[Gemini] Timeout : setupComplete non reçu en 10 s."
+                )
+            try:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    "[Gemini] Timeout : setupComplete non reçu en 10 s."
+                )
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue  # frame non-JSON → on ignore
+            if "setupComplete" in data:
+                print("[Gemini] Session configurée avec succès.")
+                return
+            # Message JSON non pertinent (ex. serverContent précoce) → on ignore
 
     # ------------------------------------------------------------------
     # Boucle d'envoi audio
