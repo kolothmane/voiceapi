@@ -62,6 +62,9 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
     def on_text(text: str) -> None:
         bridge.text_received.emit(text)
 
+    def on_connected() -> None:
+        bridge.status_changed.emit("🟢 Connecté à Gemini (écoute en cours)")
+
     # --- Prompt système final (prompt personnalisé + CV si présent) ---
     system_prompt = build_full_system_prompt(settings)
 
@@ -71,6 +74,7 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
         text_callback=on_text,
         api_key=settings.get("api_key", ""),
         system_prompt=system_prompt,
+        connected_callback=on_connected,
     )
 
     retry_delay = 5  # secondes avant la première tentative de reconnexion

@@ -9,8 +9,6 @@ Protocole (v1alpha BidiGenerateContent)
    - le modèle utilisé,
    - la modalité de réponse AUDIO (seule valeur valide pour les modèles
      native-audio ; TEXT dans responseModalities est rejeté avec 1007),
-   - ``output_audio_transcription`` pour obtenir la transcription textuelle
-     de la réponse audio du modèle,
    - le prompt système (instruction stricte), enrichi du CV si fourni.
 3. Attente du message ``setupComplete`` du serveur.
 4. En parallèle :
@@ -57,11 +55,13 @@ class GeminiClient:
         text_callback,
         api_key: str,
         system_prompt: str = "",
+        connected_callback=None,
     ) -> None:
         self._audio_queue = audio_queue
         self._text_callback = text_callback
         self._api_key = api_key
         self._system_prompt = system_prompt
+        self._connected_callback = connected_callback
         self._ws = None
 
     @property
@@ -73,52 +73,52 @@ class GeminiClient:
     # Initialisation de la session Gemini
     # ------------------------------------------------------------------
 
-    async def _send_setup(self) -> None:
-        """Envoie la configuration initiale et attend setupComplete."""
+    def _build_setup_messages(self) -> list[dict]:
+        """Construit la configuration setup compatible Gemini Live."""
         setup_msg = {
             "setup": {
                 "model": GEMINI_MODEL,
-                "generation_config": {
-                    # Les modèles native-audio (gemini-2.5-flash-native-audio-*)
-                    # n'acceptent que AUDIO comme modalité de réponse.
-                    # Inclure TEXT dans response_modalities provoque une erreur
-                    # 1007 « Request contains an invalid argument ».
-                    # Pour obtenir du texte, on active output_audio_transcription
-                    # qui renvoie la transcription de l'audio généré dans
-                    # serverContent.outputTranscription.text.
-                    "response_modalities": ["AUDIO"],
-                    "output_audio_transcription": {},
+                "generationConfig": {
+                    # Avec les modèles native-audio, la modalité de sortie doit
+                    # rester AUDIO.
+                    "responseModalities": ["AUDIO"],
                 },
-                "system_instruction": {
-                    "parts": [{"text": self._system_prompt}]
-                },
+                "systemInstruction": {"parts": [{"text": self._system_prompt}]},
             }
         }
+        return [setup_msg]
+
+    async def _send_setup(self, setup_msg: dict) -> None:
+        """Envoie une configuration initiale et attend setupComplete."""
         await self._ws.send(json.dumps(setup_msg))
 
-        # Attente de setupComplete avec un délai maximal de 10 s.
-        # On ignore les frames non-JSON et les messages non pertinents.
         deadline = asyncio.get_running_loop().time() + 10
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                raise RuntimeError(
-                    "[Gemini] Timeout : setupComplete non reçu en 10 s."
-                )
+                raise RuntimeError("[Gemini] Timeout : setupComplete non reçu en 10 s.")
             try:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
             except asyncio.TimeoutError:
-                raise RuntimeError(
-                    "[Gemini] Timeout : setupComplete non reçu en 10 s."
-                )
+                raise RuntimeError("[Gemini] Timeout : setupComplete non reçu en 10 s.")
+
             try:
                 data = json.loads(raw)
             except (json.JSONDecodeError, TypeError, ValueError):
-                continue  # frame non-JSON → on ignore
+                continue
+
             if "setupComplete" in data:
                 print("[Gemini] Session configurée avec succès.")
+                if self._connected_callback:
+                    if asyncio.iscoroutinefunction(self._connected_callback):
+                        await self._connected_callback()
+                    else:
+                        self._connected_callback()
                 return
-            # Message JSON non pertinent (ex. serverContent précoce) → on ignore
+
+            # Renvoie l'erreur serveur de façon explicite au lieu de boucler.
+            if data.get("error"):
+                raise RuntimeError(f"[Gemini] Setup rejeté : {data['error']}")
 
     # ------------------------------------------------------------------
     # Boucle d'envoi audio
@@ -177,7 +177,7 @@ class GeminiClient:
 
             # --- Source 2 : outputTranscription.text ---
             # Transcription textuelle de l'audio généré par les modèles
-            # native-audio (activée via output_audio_transcription dans le setup).
+            # native-audio (si fournie par l'API sur ce modèle/version).
             output_transcription = server_content.get("outputTranscription", {})
             transcript: str = output_transcription.get("text", "")
             if transcript:
@@ -193,30 +193,34 @@ class GeminiClient:
     async def run(self) -> None:
         """Connecte, configure la session, puis lance les deux boucles."""
         print(f"[Gemini] Connexion à {self._ws_uri[:60]}…")
-        async with websockets.connect(
-            self._ws_uri,
-            # Les pings WebSocket (protocole niveau transport) ne sont pas
-            # supportés par Gemini Live – on les désactive pour éviter des
-            # déconnexions intempestives.
-            ping_interval=None,
-            # Limite supérieure de la taille des messages WebSocket (100 MB)
-            max_size=100 * 1024 * 1024,
-        ) as ws:
-            self._ws = ws
-            await self._send_setup()
 
-            # Les deux boucles tournent en parallèle ; si l'une s'arrête,
-            # l'autre est annulée proprement.
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(self._send_audio_loop()),
-                    asyncio.create_task(self._receive_loop()),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-            # Propage les éventuelles exceptions
-            for task in done:
-                task.result()
+        setup_errors: list[str] = []
+        setup_messages = self._build_setup_messages()
 
+        for setup_msg in setup_messages:
+            try:
+                async with websockets.connect(
+                    self._ws_uri,
+                    ping_interval=None,
+                    max_size=100 * 1024 * 1024,
+                ) as ws:
+                    self._ws = ws
+                    await self._send_setup(setup_msg)
+
+                    done, pending = await asyncio.wait(
+                        [
+                            asyncio.create_task(self._send_audio_loop()),
+                            asyncio.create_task(self._receive_loop()),
+                        ],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    for task in done:
+                        task.result()
+                    return
+            except Exception as exc:
+                setup_errors.append(str(exc))
+                print(f"[Gemini] Variante setup échouée : {exc}")
+
+        raise RuntimeError(" | ".join(setup_errors) or "[Gemini] Échec de setup")

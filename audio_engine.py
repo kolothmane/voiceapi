@@ -35,6 +35,7 @@ macOS :
 import asyncio
 import base64
 import os
+import sys
 import threading
 
 import numpy as np
@@ -101,10 +102,17 @@ class AudioEngine:
         """Callback sounddevice appelé à chaque bloc audio du micro."""
         if status:
             print(f"[Audio/Mic] {status}")
-        # Conversion en PCM int16 puis encodage base64
-        pcm_bytes = indata.copy().astype(np.int16).tobytes()
+        # Downmix en mono si nécessaire puis conversion PCM int16.
+        mono = indata
+        if mono.ndim == 2 and mono.shape[1] > 1:
+            mono = np.mean(mono, axis=1, keepdims=True)
+        pcm_bytes = mono.copy().astype(np.int16).tobytes()
         encoded = base64.b64encode(pcm_bytes).decode("utf-8")
-        self._loop.call_soon_threadsafe(self._safe_enqueue, encoded)
+        # qasync + PyQt6 (notamment sous Python 3.14) peut lever
+        # une erreur de signature quand on passe des *args à
+        # call_soon_threadsafe. On encapsule donc l'appel dans un
+        # callback sans argument.
+        self._loop.call_soon_threadsafe(lambda e=encoded: self._safe_enqueue(e))
 
     def _capture_mic(self) -> None:
         """Boucle de capture micro – tourne dans un thread dédié."""
@@ -121,6 +129,70 @@ class AudioEngine:
     # ------------------------------------------------------------------
     # Loopback système (soundcard / WASAPI)
     # ------------------------------------------------------------------
+
+    def _capture_windows_loopback_sounddevice(self) -> bool:
+        """
+        Fallback Windows : capture loopback via sounddevice/WASAPI.
+
+        Utile quand soundcard casse (ex: incompatibilité NumPy). On cible
+        d'abord le périphérique de sortie par défaut WASAPI puis d'autres
+        sorties WASAPI si besoin.
+        """
+        if not sys.platform.startswith("win"):
+            return False
+
+        wasapi_settings = getattr(sd, "WasapiSettings", None)
+        if wasapi_settings is None:
+            return False
+
+        try:
+            devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
+        except Exception as exc:
+            print(f"[Audio/Loopback] Impossible de lister les périphériques WASAPI : {exc}")
+            return False
+
+        def is_wasapi(dev: dict) -> bool:
+            try:
+                host_name = hostapis[int(dev.get("hostapi", -1))]["name"]
+            except Exception:
+                return False
+            return "wasapi" in str(host_name).lower()
+
+        candidates: list[int] = []
+        default_out = sd.default.device[1] if isinstance(sd.default.device, (list, tuple)) else None
+        if isinstance(default_out, int) and default_out >= 0:
+            candidates.append(default_out)
+
+        for idx, dev in enumerate(devices):
+            if dev.get("max_output_channels", 0) >= 1 and is_wasapi(dev):
+                if idx not in candidates:
+                    candidates.append(idx)
+
+        for device_id in candidates:
+            dev = devices[device_id]
+            for channels in (CHANNELS, min(2, max(1, int(dev.get("max_output_channels", 1))))):
+                try:
+                    with sd.InputStream(
+                        device=device_id,
+                        samplerate=int(dev.get("default_samplerate") or SAMPLE_RATE),
+                        channels=channels,
+                        dtype="float32",
+                        blocksize=CHUNK_SIZE,
+                        callback=self._mic_callback,
+                        extra_settings=wasapi_settings(loopback=True),
+                    ):
+                        print(
+                            "[Audio/Loopback] WASAPI loopback via sounddevice actif sur : "
+                            f"{dev.get('name', device_id)}"
+                        )
+                        while self._running:
+                            sd.sleep(100)
+                    return True
+                except Exception:
+                    continue
+
+        return False
 
     def _capture_loopback(self) -> None:
         """
@@ -150,15 +222,21 @@ class AudioEngine:
                         data = recorder.record(numframes=CHUNK_SIZE)
                         pcm = (data * 32767).astype(np.int16)
                         encoded = base64.b64encode(pcm.tobytes()).decode("utf-8")
-                        self._loop.call_soon_threadsafe(self._safe_enqueue, encoded)
+                        self._loop.call_soon_threadsafe(
+                            lambda e=encoded: self._safe_enqueue(e)
+                        )
                 return  # succès → on ne passe pas aux alternatives
             except Exception as exc:
                 print(
                     f"[Audio/Loopback] soundcard échoue ({exc}). "
-                    "Tentative avec LOOPBACK_DEVICE…"
+                    "Tentative WASAPI sounddevice puis LOOPBACK_DEVICE…"
                 )
 
-        # --- Tentative 2 : sounddevice + LOOPBACK_DEVICE (Linux/macOS) ---
+        # --- Tentative 2 : fallback Windows sounddevice/WASAPI loopback ---
+        if self._capture_windows_loopback_sounddevice():
+            return
+
+        # --- Tentative 3 : sounddevice + LOOPBACK_DEVICE (Linux/macOS) ---
         loopback_device = os.environ.get("LOOPBACK_DEVICE")
         if loopback_device:
             try:
