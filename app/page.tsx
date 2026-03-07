@@ -205,8 +205,11 @@ export default function Page() {
           videoRef.current.srcObject = stream;
         }
         setCameraActive(true);
-      } catch {
-        setStatus("Impossible d'accéder à la caméra");
+      } catch (err) {
+        const msg = err instanceof DOMException && err.name === "NotAllowedError"
+          ? "Accès caméra refusé — vérifiez les permissions du navigateur"
+          : "Impossible d'accéder à la caméra";
+        setStatus(msg);
       }
     }
   }, [cameraActive]);
@@ -416,6 +419,7 @@ export default function Page() {
                 className="secondary"
                 onClick={startListening}
                 disabled={!speechSupported || textMode}
+                title={textMode ? "Désactivé en mode texte" : !speechSupported ? "Non supporté par ce navigateur" : "Activer la reconnaissance vocale"}
               >
                 🎤 Activer micro
               </button>
