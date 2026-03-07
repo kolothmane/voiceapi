@@ -44,6 +44,8 @@ def load_settings() -> dict:
         "job_description": "",
         "application_type": "Emploi (CDI/CDD)",
         "interview_duration_minutes": 20,
+        "input_device": "",
+        "output_device": "",
         "system_prompt": DEFAULT_SYSTEM_PROMPT,
     }
     if SETTINGS_FILE.exists():

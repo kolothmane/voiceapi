@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from audio_engine import AudioEngine
 from config import FONT_SIZE, WINDOW_HEIGHT, WINDOW_OPACITY, WINDOW_WIDTH
 from settings import DEFAULT_SYSTEM_PROMPT, extract_cv_text, save_settings
 
@@ -164,6 +165,8 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._build_api_section())
         layout.addWidget(self._make_separator())
+        layout.addWidget(self._build_audio_devices_section())
+        layout.addWidget(self._make_separator())
         layout.addWidget(self._build_cv_section())
         layout.addWidget(self._make_separator())
         layout.addWidget(self._build_interview_section())
@@ -214,6 +217,59 @@ class SettingsDialog(QDialog):
         key_row.addWidget(self._api_key_edit)
         key_row.addWidget(toggle_btn)
         layout.addLayout(key_row)
+
+        return widget
+
+    def _build_audio_devices_section(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        title = QLabel("🎚️  Périphériques audio")
+        title.setObjectName("section_title")
+        layout.addWidget(title)
+
+        hint = QLabel("Choisissez le micro d'entrée et la sortie audio pour les réponses de l'entretien.")
+        hint.setStyleSheet("color: rgba(180,190,220,0.75); font-size: 11px; background: transparent;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        devices = AudioEngine.list_audio_devices()
+        input_names = ["Défaut système"] + devices.get("inputs", [])
+        output_names = ["Défaut système"] + devices.get("outputs", [])
+
+        in_row = QHBoxLayout()
+        in_label = QLabel("Entrée micro :")
+        in_label.setStyleSheet("color: rgba(190, 200, 255, 0.9); font-size: 11px;")
+        self._input_device_combo = QComboBox()
+        self._input_device_combo.addItems(input_names)
+
+        saved_input = (self._settings.get("input_device") or "").strip()
+        if saved_input and saved_input in input_names:
+            self._input_device_combo.setCurrentText(saved_input)
+        else:
+            self._input_device_combo.setCurrentIndex(0)
+
+        in_row.addWidget(in_label)
+        in_row.addWidget(self._input_device_combo)
+        layout.addLayout(in_row)
+
+        out_row = QHBoxLayout()
+        out_label = QLabel("Sortie audio :")
+        out_label.setStyleSheet("color: rgba(190, 200, 255, 0.9); font-size: 11px;")
+        self._output_device_combo = QComboBox()
+        self._output_device_combo.addItems(output_names)
+
+        saved_output = (self._settings.get("output_device") or "").strip()
+        if saved_output and saved_output in output_names:
+            self._output_device_combo.setCurrentText(saved_output)
+        else:
+            self._output_device_combo.setCurrentIndex(0)
+
+        out_row.addWidget(out_label)
+        out_row.addWidget(self._output_device_combo)
+        layout.addLayout(out_row)
 
         return widget
 
@@ -428,6 +484,10 @@ class SettingsDialog(QDialog):
 
     def _on_accept(self) -> None:
         self._settings["api_key"] = self._api_key_edit.text().strip()
+        input_device = self._input_device_combo.currentText().strip()
+        output_device = self._output_device_combo.currentText().strip()
+        self._settings["input_device"] = "" if input_device == "Défaut système" else input_device
+        self._settings["output_device"] = "" if output_device == "Défaut système" else output_device
         self._settings["application_type"] = self._application_type_combo.currentText().strip()
         self._settings["interview_duration_minutes"] = int(self._duration_spin.value())
         self._settings["job_title"] = self._job_title_edit.text().strip()

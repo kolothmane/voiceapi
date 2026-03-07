@@ -33,7 +33,11 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
     audio_queue: queue.Queue[str] = queue.Queue(maxsize=300)
 
     # --- Moteur audio ---
-    engine = AudioEngine(audio_queue=audio_queue)
+    engine = AudioEngine(
+        audio_queue=audio_queue,
+        input_device=settings.get("input_device", ""),
+        output_device=settings.get("output_device", ""),
+    )
     engine.start()
 
     # --- Callback texte : émettre un signal Qt (thread-safe) ---
