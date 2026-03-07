@@ -36,7 +36,7 @@ from config import AUDIO_FORMAT, CHANNELS, CHUNK_SIZE, SAMPLE_RATE
 
 class AudioEngine:
     """
-    Gère la capture simultanée du microphone et du loopback système.
+    Gère la capture du microphone et la lecture audio des réponses Gemini.
 
     Usage::
 
@@ -49,8 +49,12 @@ class AudioEngine:
     def __init__(
         self,
         audio_queue: "queue.Queue[str]",
+        input_device: str = "",
+        output_device: str = "",
     ) -> None:
         self._queue = audio_queue
+        self._input_device_name = input_device.strip()
+        self._output_device_name = output_device.strip()
         self._running = False
         self._threads: list[threading.Thread] = []
         self._dropped_chunks: int = 0  # compteur pour le monitoring
@@ -60,6 +64,47 @@ class AudioEngine:
         # de la session Gemini, ce qui évite de remplir la queue
         # avec des chunks périmés pendant la phase de connexion.
         self._gate = threading.Event()
+        self._playback_queue: "queue.Queue[tuple[bytes, int]]" = queue.Queue(maxsize=200)
+        self._playback_thread: threading.Thread | None = None
+        self._playback_running = False
+
+    @staticmethod
+    def list_audio_devices() -> dict[str, list[str]]:
+        """Retourne les listes de périphériques input/output disponibles."""
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return {"inputs": [], "outputs": []}
+
+        inputs: list[str] = []
+        outputs: list[str] = []
+        for dev in devices:
+            name = str(dev.get("name", "")).strip()
+            if not name:
+                continue
+            if dev.get("max_input_channels", 0) > 0:
+                inputs.append(name)
+            if dev.get("max_output_channels", 0) > 0:
+                outputs.append(name)
+
+        return {"inputs": sorted(set(inputs)), "outputs": sorted(set(outputs))}
+
+    @staticmethod
+    def _resolve_device_id(device_name: str, want_input: bool) -> int | None:
+        if not device_name:
+            return None
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return None
+
+        key = "max_input_channels" if want_input else "max_output_channels"
+        for idx, dev in enumerate(devices):
+            if dev.get(key, 0) <= 0:
+                continue
+            if str(dev.get("name", "")).strip() == device_name:
+                return idx
+        return None
 
     # ------------------------------------------------------------------
     # Utilitaire partagé – injection thread-safe
@@ -109,22 +154,33 @@ class AudioEngine:
         """Callback sounddevice appelé à chaque bloc audio du micro."""
         if status:
             print(f"[Audio/Mic] {status}")
-        # Conversion en PCM int16 puis encodage base64
-        pcm_bytes = indata.copy().astype(np.int16).tobytes()
+        # Conversion robuste vers PCM int16 puis encodage base64
+        if indata.dtype == np.float32:
+            pcm_bytes = (np.clip(indata, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        else:
+            pcm_bytes = indata.copy().astype(np.int16).tobytes()
         encoded = base64.b64encode(pcm_bytes).decode("utf-8")
         self._safe_enqueue(encoded)
 
     def _capture_mic(self) -> None:
         """Boucle de capture micro – tourne dans un thread dédié."""
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype=AUDIO_FORMAT,
-            blocksize=CHUNK_SIZE,
-            callback=self._mic_callback,
-        ):
-            while self._running:
-                sd.sleep(100)  # laisse le callback travailler
+        input_device_id = self._resolve_device_id(self._input_device_name, want_input=True)
+        try:
+            with sd.InputStream(
+                device=input_device_id,
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                # float32 est le format natif le plus compatible côté drivers.
+                dtype="float32",
+                blocksize=CHUNK_SIZE,
+                callback=self._mic_callback,
+            ):
+                dev_label = self._input_device_name or "périphérique par défaut"
+                print(f"[Audio/Mic] Capture active sur : {dev_label}")
+                while self._running:
+                    sd.sleep(100)  # laisse le callback travailler
+        except Exception as exc:
+            print(f"[Audio/Mic] Impossible d'ouvrir le micro ({self._input_device_name or 'défaut'}) : {exc}")
 
     # ------------------------------------------------------------------
     # Loopback système (soundcard / WASAPI)
@@ -387,21 +443,81 @@ class AudioEngine:
     # API publique
     # ------------------------------------------------------------------
 
+    def enqueue_output_audio(self, pcm_bytes: bytes, sample_rate: int) -> None:
+        """Ajoute un chunk PCM (int16 mono) à la file de lecture audio."""
+        try:
+            self._playback_queue.put_nowait((pcm_bytes, sample_rate))
+        except queue.Full:
+            try:
+                self._playback_queue.get_nowait()
+                self._playback_queue.put_nowait((pcm_bytes, sample_rate))
+            except Exception:
+                pass
+
+    def _playback_loop(self) -> None:
+        """Lit les chunks audio Gemini reçus depuis le websocket."""
+        current_stream = None
+        current_rate = None
+        while self._playback_running:
+            try:
+                pcm_bytes, sample_rate = self._playback_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if sample_rate <= 0:
+                sample_rate = SAMPLE_RATE
+
+            try:
+                if current_stream is None or current_rate != sample_rate:
+                    if current_stream is not None:
+                        current_stream.stop()
+                        current_stream.close()
+                    output_device_id = self._resolve_device_id(self._output_device_name, want_input=False)
+                    current_stream = sd.RawOutputStream(
+                        device=output_device_id,
+                        samplerate=sample_rate,
+                        channels=CHANNELS,
+                        dtype="int16",
+                    )
+                    current_stream.start()
+                    current_rate = sample_rate
+
+                current_stream.write(pcm_bytes)
+            except Exception as exc:
+                print(f"[Audio/Output] Lecture audio impossible: {exc}")
+
+        if current_stream is not None:
+            try:
+                current_stream.stop()
+                current_stream.close()
+            except Exception:
+                pass
+
     def start(self) -> None:
-        """Démarre les threads de capture micro et loopback."""
+        """Démarre la capture micro et la lecture des réponses audio."""
         self._running = True
+        self._playback_running = True
+
         mic_thread = threading.Thread(
             target=self._capture_mic, name="mic-capture", daemon=True
         )
-        loopback_thread = threading.Thread(
-            target=self._capture_loopback, name="loopback-capture", daemon=True
+        playback_thread = threading.Thread(
+            target=self._playback_loop, name="audio-playback", daemon=True
         )
-        self._threads = [mic_thread, loopback_thread]
+
+        self._threads = [mic_thread]
+        self._playback_thread = playback_thread
+
         for t in self._threads:
             t.start()
-        print("[Audio] Capture démarrée (micro + loopback).")
+        playback_thread.start()
+        print(
+            "[Audio] Capture micro + lecture audio démarrées "
+            f"(input={self._input_device_name or 'défaut'}, output={self._output_device_name or 'défaut'})."
+        )
 
     def stop(self) -> None:
-        """Signale l'arrêt à tous les threads de capture."""
+        """Signale l'arrêt à tous les threads audio."""
         self._running = False
-        print("[Audio] Capture arrêtée.")
+        self._playback_running = False
+        print("[Audio] Audio arrêté.")
