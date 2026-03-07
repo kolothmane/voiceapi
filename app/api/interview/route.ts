@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const MODEL = "gemini-2.0-flash";
+const MODEL = process.env.GEMINI_MODEL || "models/gemini-2.5-flash";
 
 function buildPrompt(payload: {
   cvText: string;
@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
   const prompt = buildPrompt(body);
 
   const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
