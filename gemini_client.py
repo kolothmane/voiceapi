@@ -46,12 +46,14 @@ class GeminiClient:
         api_key: str,
         system_prompt: str = "",
         connected_callback=None,
+        audio_callback=None,
     ) -> None:
         self._audio_queue = audio_queue
         self._text_callback = text_callback
         self._api_key = api_key
         self._system_prompt = system_prompt
         self._connected_callback = connected_callback
+        self._audio_callback = audio_callback
         self._ws: websockets.WebSocketClientProtocol | None = None
 
     @property
@@ -204,6 +206,25 @@ class GeminiClient:
                     else:
                         self._text_callback(text)
 
+                inline_data = part.get("inlineData") or {}
+                audio_b64 = inline_data.get("data", "")
+                mime_type = inline_data.get("mimeType", "")
+                if audio_b64 and self._audio_callback:
+                    sample_rate = SAMPLE_RATE
+                    if "rate=" in mime_type:
+                        try:
+                            sample_rate = int(mime_type.split("rate=")[1].split(";")[0])
+                        except Exception:
+                            sample_rate = SAMPLE_RATE
+                    try:
+                        pcm_bytes = base64.b64decode(audio_b64)
+                        if asyncio.iscoroutinefunction(self._audio_callback):
+                            await self._audio_callback(pcm_bytes, sample_rate)
+                        else:
+                            self._audio_callback(pcm_bytes, sample_rate)
+                    except Exception:
+                        pass
+
             # --- Source 2 : outputTranscription.text ---
             output_transcription = server_content.get("outputTranscription", {})
             transcript: str = output_transcription.get("text", "") or ""
@@ -212,6 +233,36 @@ class GeminiClient:
                     await self._text_callback(transcript)
                 else:
                     self._text_callback(transcript)
+
+    async def request_final_report(self) -> None:
+        """Demande explicitement à Gemini de clôturer l'entretien avec un compte rendu."""
+        if not self._ws:
+            return
+        msg = {
+            "clientContent": {
+                "turns": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": (
+                                    "Le temps est écoulé. Merci de terminer l'entretien maintenant "
+                                    "et de fournir un compte rendu structuré en français : "
+                                    "résumé, points forts, axes d'amélioration, conseils concrets."
+                                )
+                            }
+                        ],
+                    }
+                ],
+                "turnComplete": True,
+            }
+        }
+        await self._ws.send(json.dumps(msg))
+
+    async def close(self) -> None:
+        """Ferme proprement la websocket active."""
+        if self._ws:
+            await self._ws.close()
 
     # ------------------------------------------------------------------
     # Point d'entrée public

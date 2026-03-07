@@ -8,6 +8,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
+    QComboBox,
     QDialogButtonBox,
     QFileDialog,
     QFrame,
@@ -17,11 +18,13 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from audio_engine import AudioEngine
 from config import FONT_SIZE, WINDOW_HEIGHT, WINDOW_OPACITY, WINDOW_WIDTH
 from settings import DEFAULT_SYSTEM_PROMPT, extract_cv_text, save_settings
 
@@ -68,7 +71,7 @@ _DARK_DIALOG_STYLE = """
         font-weight: bold;
         font-size: 12px;
     }
-    QLineEdit, QTextEdit {
+    QLineEdit, QTextEdit, QComboBox, QSpinBox {
         background-color: #1e1e32;
         color: #e1e6ff;
         border: 1px solid rgba(255, 255, 255, 0.18);
@@ -76,7 +79,7 @@ _DARK_DIALOG_STYLE = """
         padding: 6px;
         selection-background-color: rgba(80, 100, 255, 0.6);
     }
-    QLineEdit:focus, QTextEdit:focus {
+    QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus {
         border: 1px solid rgba(80, 100, 255, 0.8);
     }
     QPushButton {
@@ -162,7 +165,11 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._build_api_section())
         layout.addWidget(self._make_separator())
+        layout.addWidget(self._build_audio_devices_section())
+        layout.addWidget(self._make_separator())
         layout.addWidget(self._build_cv_section())
+        layout.addWidget(self._make_separator())
+        layout.addWidget(self._build_interview_section())
         layout.addWidget(self._make_separator())
         layout.addWidget(self._build_prompt_section())
         layout.addStretch()
@@ -213,6 +220,59 @@ class SettingsDialog(QDialog):
 
         return widget
 
+    def _build_audio_devices_section(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        title = QLabel("🎚️  Périphériques audio")
+        title.setObjectName("section_title")
+        layout.addWidget(title)
+
+        hint = QLabel("Choisissez le micro d'entrée et la sortie audio pour les réponses de l'entretien.")
+        hint.setStyleSheet("color: rgba(180,190,220,0.75); font-size: 11px; background: transparent;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        devices = AudioEngine.list_audio_devices()
+        input_names = ["Défaut système"] + devices.get("inputs", [])
+        output_names = ["Défaut système"] + devices.get("outputs", [])
+
+        in_row = QHBoxLayout()
+        in_label = QLabel("Entrée micro :")
+        in_label.setStyleSheet("color: rgba(190, 200, 255, 0.9); font-size: 11px;")
+        self._input_device_combo = QComboBox()
+        self._input_device_combo.addItems(input_names)
+
+        saved_input = (self._settings.get("input_device") or "").strip()
+        if saved_input and saved_input in input_names:
+            self._input_device_combo.setCurrentText(saved_input)
+        else:
+            self._input_device_combo.setCurrentIndex(0)
+
+        in_row.addWidget(in_label)
+        in_row.addWidget(self._input_device_combo)
+        layout.addLayout(in_row)
+
+        out_row = QHBoxLayout()
+        out_label = QLabel("Sortie audio :")
+        out_label.setStyleSheet("color: rgba(190, 200, 255, 0.9); font-size: 11px;")
+        self._output_device_combo = QComboBox()
+        self._output_device_combo.addItems(output_names)
+
+        saved_output = (self._settings.get("output_device") or "").strip()
+        if saved_output and saved_output in output_names:
+            self._output_device_combo.setCurrentText(saved_output)
+        else:
+            self._output_device_combo.setCurrentIndex(0)
+
+        out_row.addWidget(out_label)
+        out_row.addWidget(self._output_device_combo)
+        layout.addLayout(out_row)
+
+        return widget
+
     def _build_cv_section(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -258,6 +318,75 @@ class SettingsDialog(QDialog):
         self._cv_preview.setFixedHeight(90)
         self._cv_preview.setPlainText(self._settings.get("cv_text", ""))
         layout.addWidget(self._cv_preview)
+
+        return widget
+
+
+    def _build_interview_section(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        title = QLabel("🎯  Cible de candidature")
+        title.setObjectName("section_title")
+        layout.addWidget(title)
+
+        hint = QLabel(
+            "Renseignez le poste visé pour transformer l'app en simulateur d'entretien."
+        )
+        hint.setStyleSheet("color: rgba(180,190,220,0.75); font-size: 11px; background: transparent;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        type_row = QHBoxLayout()
+        type_label = QLabel("Type :")
+        type_label.setStyleSheet("color: rgba(190, 200, 255, 0.9); font-size: 11px;")
+
+        self._application_type_combo = QComboBox()
+        self._application_type_combo.addItems([
+            "Emploi (CDI/CDD)",
+            "Stage",
+            "Alternance",
+            "Freelance / Mission",
+            "Graduate Program",
+            "Autre",
+        ])
+        current_type = self._settings.get("application_type", "Emploi (CDI/CDD)")
+        idx = self._application_type_combo.findText(current_type)
+        if idx >= 0:
+            self._application_type_combo.setCurrentIndex(idx)
+
+        type_row.addWidget(type_label)
+        type_row.addWidget(self._application_type_combo)
+        layout.addLayout(type_row)
+
+        duration_row = QHBoxLayout()
+        duration_label = QLabel("Durée (minutes) :")
+        duration_label.setStyleSheet("color: rgba(190, 200, 255, 0.9); font-size: 11px;")
+
+        self._duration_spin = QSpinBox()
+        self._duration_spin.setRange(5, 90)
+        self._duration_spin.setSingleStep(5)
+        self._duration_spin.setValue(int(self._settings.get("interview_duration_minutes", 20)))
+
+        duration_row.addWidget(duration_label)
+        duration_row.addWidget(self._duration_spin)
+        duration_row.addStretch()
+        layout.addLayout(duration_row)
+
+        self._job_title_edit = QLineEdit()
+        self._job_title_edit.setPlaceholderText("Intitulé du poste (ex: Data Analyst Marketing)")
+        self._job_title_edit.setText(self._settings.get("job_title", ""))
+        layout.addWidget(self._job_title_edit)
+
+        self._job_description_edit = QTextEdit()
+        self._job_description_edit.setPlaceholderText(
+            "Description du poste (optionnel): missions, stack, responsabilités, etc."
+        )
+        self._job_description_edit.setFixedHeight(90)
+        self._job_description_edit.setPlainText(self._settings.get("job_description", ""))
+        layout.addWidget(self._job_description_edit)
 
         return widget
 
@@ -355,6 +484,14 @@ class SettingsDialog(QDialog):
 
     def _on_accept(self) -> None:
         self._settings["api_key"] = self._api_key_edit.text().strip()
+        input_device = self._input_device_combo.currentText().strip()
+        output_device = self._output_device_combo.currentText().strip()
+        self._settings["input_device"] = "" if input_device == "Défaut système" else input_device
+        self._settings["output_device"] = "" if output_device == "Défaut système" else output_device
+        self._settings["application_type"] = self._application_type_combo.currentText().strip()
+        self._settings["interview_duration_minutes"] = int(self._duration_spin.value())
+        self._settings["job_title"] = self._job_title_edit.text().strip()
+        self._settings["job_description"] = self._job_description_edit.toPlainText().strip()
         self._settings["system_prompt"] = self._prompt_edit.toPlainText().strip()
         self.accept()
 

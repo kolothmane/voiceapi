@@ -1,5 +1,6 @@
 
 import asyncio
+import contextlib
 import queue
 import sys
 
@@ -32,7 +33,11 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
     audio_queue: queue.Queue[str] = queue.Queue(maxsize=300)
 
     # --- Moteur audio ---
-    engine = AudioEngine(audio_queue=audio_queue)
+    engine = AudioEngine(
+        audio_queue=audio_queue,
+        input_device=settings.get("input_device", ""),
+        output_device=settings.get("output_device", ""),
+    )
     engine.start()
 
     # --- Callback texte : émettre un signal Qt (thread-safe) ---
@@ -41,7 +46,17 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
 
     def on_connected() -> None:
         engine.enable_sending()
-        bridge.status_changed.emit("🟢 Connecté à Gemini (écoute en cours)")
+        bridge.status_changed.emit("🟢 Connecté à Gemini (entretien en cours)")
+
+    interview_duration_minutes = int(settings.get("interview_duration_minutes", 20) or 20)
+
+    async def end_interview_after_timeout() -> None:
+        await asyncio.sleep(max(interview_duration_minutes, 1) * 60)
+        bridge.status_changed.emit("⏱ Temps écoulé : génération du compte rendu…")
+        engine.disable_sending()
+        await client.request_final_report()
+        await asyncio.sleep(20)
+        await client.close()
 
     # --- Prompt système final (prompt personnalisé + CV si présent) ---
     system_prompt = build_full_system_prompt(settings)
@@ -53,22 +68,31 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
         api_key=settings.get("api_key", ""),
         system_prompt=system_prompt,
         connected_callback=on_connected,
+        audio_callback=engine.enqueue_output_audio,
     )
 
     retry_delay = 5  # secondes avant la première tentative de reconnexion
+
+    timeout_task: asyncio.Task | None = None
 
     try:
         while True:
             try:
                 bridge.status_changed.emit("⏳ Connexion à Gemini…")
+                timeout_task = asyncio.create_task(end_interview_after_timeout())
                 await client.run()
-                # Sortie propre (ne devrait pas arriver en cours de session)
+                # Sortie propre (fin d'entretien ou fermeture)
                 break
             except asyncio.CancelledError:
                 # Annulation intentionnelle (changement de paramètres)
                 raise
             except Exception as exc:
                 engine.disable_sending()
+                if timeout_task is not None:
+                    timeout_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await timeout_task
+                    timeout_task = None
                 error_msg = f"\n\n⚠️  Erreur Gemini : {exc}"
                 bridge.text_received.emit(error_msg)
                 bridge.status_changed.emit(f"🔁 Reconnexion dans {retry_delay}s…")
@@ -84,6 +108,10 @@ async def async_main(bridge: TextBridge, settings: dict) -> None:
                 # Backoff exponentiel plafonné à 60 s
                 retry_delay = min(retry_delay * 2, 60)
     finally:
+        if timeout_task is not None:
+            timeout_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await timeout_task
         engine.stop()
 
 
