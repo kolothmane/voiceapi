@@ -49,8 +49,12 @@ class AudioEngine:
     def __init__(
         self,
         audio_queue: "queue.Queue[str]",
+        input_device: str = "",
+        output_device: str = "",
     ) -> None:
         self._queue = audio_queue
+        self._input_device_name = input_device.strip()
+        self._output_device_name = output_device.strip()
         self._running = False
         self._threads: list[threading.Thread] = []
         self._dropped_chunks: int = 0  # compteur pour le monitoring
@@ -63,6 +67,44 @@ class AudioEngine:
         self._playback_queue: "queue.Queue[tuple[bytes, int]]" = queue.Queue(maxsize=200)
         self._playback_thread: threading.Thread | None = None
         self._playback_running = False
+
+    @staticmethod
+    def list_audio_devices() -> dict[str, list[str]]:
+        """Retourne les listes de périphériques input/output disponibles."""
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return {"inputs": [], "outputs": []}
+
+        inputs: list[str] = []
+        outputs: list[str] = []
+        for dev in devices:
+            name = str(dev.get("name", "")).strip()
+            if not name:
+                continue
+            if dev.get("max_input_channels", 0) > 0:
+                inputs.append(name)
+            if dev.get("max_output_channels", 0) > 0:
+                outputs.append(name)
+
+        return {"inputs": sorted(set(inputs)), "outputs": sorted(set(outputs))}
+
+    @staticmethod
+    def _resolve_device_id(device_name: str, want_input: bool) -> int | None:
+        if not device_name:
+            return None
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return None
+
+        key = "max_input_channels" if want_input else "max_output_channels"
+        for idx, dev in enumerate(devices):
+            if dev.get(key, 0) <= 0:
+                continue
+            if str(dev.get("name", "")).strip() == device_name:
+                return idx
+        return None
 
     # ------------------------------------------------------------------
     # Utilitaire partagé – injection thread-safe
@@ -112,22 +154,33 @@ class AudioEngine:
         """Callback sounddevice appelé à chaque bloc audio du micro."""
         if status:
             print(f"[Audio/Mic] {status}")
-        # Conversion en PCM int16 puis encodage base64
-        pcm_bytes = indata.copy().astype(np.int16).tobytes()
+        # Conversion robuste vers PCM int16 puis encodage base64
+        if indata.dtype == np.float32:
+            pcm_bytes = (np.clip(indata, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        else:
+            pcm_bytes = indata.copy().astype(np.int16).tobytes()
         encoded = base64.b64encode(pcm_bytes).decode("utf-8")
         self._safe_enqueue(encoded)
 
     def _capture_mic(self) -> None:
         """Boucle de capture micro – tourne dans un thread dédié."""
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype=AUDIO_FORMAT,
-            blocksize=CHUNK_SIZE,
-            callback=self._mic_callback,
-        ):
-            while self._running:
-                sd.sleep(100)  # laisse le callback travailler
+        input_device_id = self._resolve_device_id(self._input_device_name, want_input=True)
+        try:
+            with sd.InputStream(
+                device=input_device_id,
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                # float32 est le format natif le plus compatible côté drivers.
+                dtype="float32",
+                blocksize=CHUNK_SIZE,
+                callback=self._mic_callback,
+            ):
+                dev_label = self._input_device_name or "périphérique par défaut"
+                print(f"[Audio/Mic] Capture active sur : {dev_label}")
+                while self._running:
+                    sd.sleep(100)  # laisse le callback travailler
+        except Exception as exc:
+            print(f"[Audio/Mic] Impossible d'ouvrir le micro ({self._input_device_name or 'défaut'}) : {exc}")
 
     # ------------------------------------------------------------------
     # Loopback système (soundcard / WASAPI)
@@ -419,7 +472,9 @@ class AudioEngine:
                     if current_stream is not None:
                         current_stream.stop()
                         current_stream.close()
+                    output_device_id = self._resolve_device_id(self._output_device_name, want_input=False)
                     current_stream = sd.RawOutputStream(
+                        device=output_device_id,
                         samplerate=sample_rate,
                         channels=CHANNELS,
                         dtype="int16",
@@ -456,7 +511,10 @@ class AudioEngine:
         for t in self._threads:
             t.start()
         playback_thread.start()
-        print("[Audio] Capture micro + lecture audio démarrées.")
+        print(
+            "[Audio] Capture micro + lecture audio démarrées "
+            f"(input={self._input_device_name or 'défaut'}, output={self._output_device_name or 'défaut'})."
+        )
 
     def stop(self) -> None:
         """Signale l'arrêt à tous les threads audio."""
