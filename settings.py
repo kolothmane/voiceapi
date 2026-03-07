@@ -16,11 +16,10 @@ SETTINGS_FILE: Path = SETTINGS_DIR / "settings.json"
 # ---------------------------------------------------------------------------
 
 DEFAULT_SYSTEM_PROMPT: str = (
-    "Tu es un assistant furtif. Ton rôle est d'écouter la conversation et de me "
-    "souffler des réponses courtes, percutantes et techniques. L'entretien concerne "
-    "une recherche de stage de 6 mois à partir d'avril 2026, dans le domaine de "
-    "l'analyse de données avec un focus marketing. Sois direct, pas de phrases "
-    "d'introduction."
+    "Tu es un recruteur expérimenté et bienveillant qui conduit un entretien oral "
+    "de simulation avec le candidat. Pose des questions une par une, adapte-toi au "
+    "profil et au poste visé, puis donne un feedback court et concret en fin "
+    "d'entretien."
 )
 
 
@@ -41,6 +40,12 @@ def load_settings() -> dict:
         "api_key": "",
         "cv_text": "",
         "cv_path": "",
+        "job_title": "",
+        "job_description": "",
+        "application_type": "Emploi (CDI/CDD)",
+        "interview_duration_minutes": 20,
+        "input_device": "",
+        "output_device": "",
         "system_prompt": DEFAULT_SYSTEM_PROMPT,
     }
     if SETTINGS_FILE.exists():
@@ -124,7 +129,45 @@ def build_full_system_prompt(settings: dict) -> str:
     pour personnaliser les réponses de Gemini.
     """
     prompt: str = settings.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+    job_title: str = (settings.get("job_title") or "").strip()
+    job_description: str = (settings.get("job_description") or "").strip()
+    application_type: str = (settings.get("application_type") or "").strip()
     cv_text: str = (settings.get("cv_text") or "").strip()
+    interview_duration_minutes = int(settings.get("interview_duration_minutes") or 20)
+
+    context_lines: list[str] = [
+        "=== CONTEXTE CANDIDAT ===",
+        f"Type de candidature : {application_type or 'Non précisé'}",
+        f"Poste ciblé : {job_title or 'Non précisé'}",
+        f"Durée cible de l'entretien : {interview_duration_minutes} minutes",
+    ]
+
+    if job_description:
+        context_lines.extend(
+            [
+                "Description du poste :",
+                job_description,
+            ]
+        )
+
     if cv_text:
-        prompt += f"\n\n=== MON CV ===\n{cv_text}\n==============="
+        context_lines.extend(
+            [
+                "CV du candidat :",
+                cv_text,
+            ]
+        )
+
+    context_lines.extend(
+        [
+            "=== CONSIGNES D'ENTRETIEN ===",
+            "- Tu joues le rôle de l'employeur / recruteur.",
+            "- Tu mènes une simulation réaliste d'entretien d'embauche.",
+            "- Tu poses une seule question à la fois et attends la réponse du candidat.",
+            "- Tu ajustes la difficulté selon les réponses et le niveau perçu.",
+            "- À la fin, fournis un compte rendu structuré en français: résumé, points forts, axes d'amélioration, conseils concrets.",
+        ]
+    )
+
+    prompt += "\n\n" + "\n".join(context_lines)
     return prompt
