@@ -43,6 +43,7 @@ def load_settings() -> dict:
         "job_title": "",
         "job_description": "",
         "application_type": "Emploi (CDI/CDD)",
+        "interview_duration_minutes": 20,
         "system_prompt": DEFAULT_SYSTEM_PROMPT,
     }
     if SETTINGS_FILE.exists():
@@ -130,11 +131,13 @@ def build_full_system_prompt(settings: dict) -> str:
     job_description: str = (settings.get("job_description") or "").strip()
     application_type: str = (settings.get("application_type") or "").strip()
     cv_text: str = (settings.get("cv_text") or "").strip()
+    interview_duration_minutes = int(settings.get("interview_duration_minutes") or 20)
 
     context_lines: list[str] = [
         "=== CONTEXTE CANDIDAT ===",
         f"Type de candidature : {application_type or 'Non précisé'}",
         f"Poste ciblé : {job_title or 'Non précisé'}",
+        f"Durée cible de l'entretien : {interview_duration_minutes} minutes",
     ]
 
     if job_description:
@@ -160,7 +163,7 @@ def build_full_system_prompt(settings: dict) -> str:
             "- Tu mènes une simulation réaliste d'entretien d'embauche.",
             "- Tu poses une seule question à la fois et attends la réponse du candidat.",
             "- Tu ajustes la difficulté selon les réponses et le niveau perçu.",
-            "- À la fin, donne un bilan synthétique: points forts, points faibles, conseils.",
+            "- À la fin, fournis un compte rendu structuré en français: résumé, points forts, axes d'amélioration, conseils concrets.",
         ]
     )
 

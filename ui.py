@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -69,7 +70,7 @@ _DARK_DIALOG_STYLE = """
         font-weight: bold;
         font-size: 12px;
     }
-    QLineEdit, QTextEdit, QComboBox {
+    QLineEdit, QTextEdit, QComboBox, QSpinBox {
         background-color: #1e1e32;
         color: #e1e6ff;
         border: 1px solid rgba(255, 255, 255, 0.18);
@@ -77,7 +78,7 @@ _DARK_DIALOG_STYLE = """
         padding: 6px;
         selection-background-color: rgba(80, 100, 255, 0.6);
     }
-    QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
+    QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus {
         border: 1px solid rgba(80, 100, 255, 0.8);
     }
     QPushButton {
@@ -304,6 +305,20 @@ class SettingsDialog(QDialog):
         type_row.addWidget(self._application_type_combo)
         layout.addLayout(type_row)
 
+        duration_row = QHBoxLayout()
+        duration_label = QLabel("Durée (minutes) :")
+        duration_label.setStyleSheet("color: rgba(190, 200, 255, 0.9); font-size: 11px;")
+
+        self._duration_spin = QSpinBox()
+        self._duration_spin.setRange(5, 90)
+        self._duration_spin.setSingleStep(5)
+        self._duration_spin.setValue(int(self._settings.get("interview_duration_minutes", 20)))
+
+        duration_row.addWidget(duration_label)
+        duration_row.addWidget(self._duration_spin)
+        duration_row.addStretch()
+        layout.addLayout(duration_row)
+
         self._job_title_edit = QLineEdit()
         self._job_title_edit.setPlaceholderText("Intitulé du poste (ex: Data Analyst Marketing)")
         self._job_title_edit.setText(self._settings.get("job_title", ""))
@@ -414,6 +429,7 @@ class SettingsDialog(QDialog):
     def _on_accept(self) -> None:
         self._settings["api_key"] = self._api_key_edit.text().strip()
         self._settings["application_type"] = self._application_type_combo.currentText().strip()
+        self._settings["interview_duration_minutes"] = int(self._duration_spin.value())
         self._settings["job_title"] = self._job_title_edit.text().strip()
         self._settings["job_description"] = self._job_description_edit.toPlainText().strip()
         self._settings["system_prompt"] = self._prompt_edit.toPlainText().strip()
