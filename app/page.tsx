@@ -34,6 +34,16 @@ export default function Page() {
   const [textMode, setTextMode] = useState(false);
   const [textInput, setTextInput] = useState("");
 
+  // Answer control state (Répondre / Fin button)
+  const [isAnswering, setIsAnswering] = useState(false);
+  const pendingAnswerRef = useRef("");
+  const [interviewStarted, setInterviewStarted] = useState(false);
+
+  // ATS score state
+  const [atsScore, setAtsScore] = useState<number | null>(null);
+  const [atsDetails, setAtsDetails] = useState("");
+  const [atsLoading, setAtsLoading] = useState(false);
+
   const recognitionRef = useRef<any>(null);
   const speakingRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -72,6 +82,27 @@ export default function Page() {
     setStatus(finalReport ? "Compte rendu généré" : "En entretien");
   };
 
+  const fetchAtsScore = async (cv: string) => {
+    if (!cv.trim() || !jobTitle.trim()) return;
+    setAtsLoading(true);
+    try {
+      const res = await fetch("/api/ats-score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cvText: cv, jobTitle, jobDescription }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setAtsScore(data.score ?? null);
+        setAtsDetails(data.details ?? "");
+      }
+    } catch {
+      // silently ignore ATS errors
+    } finally {
+      setAtsLoading(false);
+    }
+  };
+
   const handleCvUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -92,8 +123,10 @@ export default function Page() {
       if (!res.ok) {
         throw new Error(data?.error || "Impossible d'extraire le CV.");
       }
-      setCvText(data?.text || "");
+      const extractedText = data?.text || "";
+      setCvText(extractedText);
       setStatus("CV importé et extrait automatiquement ✅");
+      fetchAtsScore(extractedText);
     } catch (error) {
       setStatus(`Erreur extraction CV: ${error instanceof Error ? error.message : "inconnue"}`);
     } finally {
@@ -135,19 +168,58 @@ export default function Page() {
     setMessages(initialHistory);
     setStatus("Démarrage...");
     setSecondsLeft(durationMinutes * 60);
+    setInterviewStarted(true);
+    setIsAnswering(false);
+    pendingAnswerRef.current = "";
     await sendToGemini(false, initialHistory);
-    if (!textMode) {
-      startListening();
-    }
   };
 
   const stopInterview = async () => {
     setListening(false);
+    setIsAnswering(false);
+    setInterviewStarted(false);
+    pendingAnswerRef.current = "";
     setStatus("Entretien stoppé");
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
       } catch {}
+    }
+  };
+
+  // Start answering: activate mic (voice mode) or focus text input
+  const startAnswering = () => {
+    setIsAnswering(true);
+    pendingAnswerRef.current = "";
+    setStatus("🎙️ Répondez maintenant...");
+    if (!textMode) {
+      startListening();
+    }
+  };
+
+  // Finish answering: stop mic, send accumulated answer
+  const finishAnswering = () => {
+    setIsAnswering(false);
+    if (!textMode) {
+      // Stop recognition
+      setListening(false);
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+      // Send accumulated answer
+      const answer = pendingAnswerRef.current.trim();
+      pendingAnswerRef.current = "";
+      if (answer) {
+        setMessages((prev) => {
+          const next = [...prev, { role: "user" as const, text: answer }];
+          sendToGemini(false, next);
+          return next;
+        });
+      } else {
+        setStatus("Aucune réponse détectée. Cliquez sur Répondre pour réessayer.");
+      }
     }
   };
 
@@ -158,16 +230,15 @@ export default function Page() {
     rec.lang = "fr-FR";
     rec.continuous = true;
     rec.interimResults = false;
-    rec.onresult = async (event: any) => {
+    rec.onresult = (event: any) => {
       const last = event.results[event.results.length - 1];
       if (!last?.isFinal) return;
       const text = String(last[0]?.transcript || "").trim();
       if (!text) return;
-      setMessages((prev) => {
-        const next = [...prev, { role: "user" as const, text }];
-        sendToGemini(false, next);
-        return next;
-      });
+      // Accumulate the answer instead of sending immediately
+      pendingAnswerRef.current = pendingAnswerRef.current
+        ? `${pendingAnswerRef.current} ${text}`
+        : text;
     };
     rec.onend = () => {
       if (listening && !speakingRef.current) {
@@ -180,7 +251,7 @@ export default function Page() {
     setListening(true);
     try {
       rec.start();
-      setStatus("En entretien");
+      setStatus("🎙️ Répondez maintenant...");
     } catch {}
   };
 
@@ -192,18 +263,12 @@ export default function Page() {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
       setCameraActive(false);
     } else {
       // Start camera
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
         setCameraActive(true);
       } catch (err) {
         const msg = err instanceof DOMException && err.name === "NotAllowedError"
@@ -211,6 +276,13 @@ export default function Page() {
           : "Impossible d'accéder à la caméra";
         setStatus(msg);
       }
+    }
+  }, [cameraActive]);
+
+  // Attach stream to video element once camera is active and element is rendered
+  useEffect(() => {
+    if (cameraActive && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
     }
   }, [cameraActive]);
 
@@ -262,6 +334,9 @@ export default function Page() {
     if (secondsLeft <= 0) {
       setSecondsLeft(null);
       setListening(false);
+      setIsAnswering(false);
+      setInterviewStarted(false);
+      pendingAnswerRef.current = "";
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
@@ -391,6 +466,40 @@ export default function Page() {
                     ? `Fichier importé : ${cvFileName}`
                     : "Aucun fichier importé"}
               </p>
+              {/* ATS Score Display */}
+              {atsLoading && (
+                <div className="ats-score-card" style={{ marginTop: 12 }}>
+                  <p>⏳ Calcul du score ATS en cours...</p>
+                </div>
+              )}
+              {atsScore !== null && !atsLoading && (
+                <div className="ats-score-card" style={{ marginTop: 12 }}>
+                  <div className="ats-header">
+                    <span className="ats-label">📊 Score ATS</span>
+                    <span className={`ats-value ${atsScore >= 70 ? "ats-good" : atsScore >= 40 ? "ats-medium" : "ats-low"}`}>
+                      {atsScore}/100
+                    </span>
+                  </div>
+                  {atsDetails && <p className="ats-details">{atsDetails}</p>}
+                  <button
+                    className="secondary"
+                    style={{ marginTop: 8, fontSize: 12, padding: "6px 12px" }}
+                    onClick={() => fetchAtsScore(cvText)}
+                    disabled={atsLoading || !cvText.trim() || !jobTitle.trim()}
+                  >
+                    🔄 Recalculer
+                  </button>
+                </div>
+              )}
+              {cvText && jobTitle && atsScore === null && !atsLoading && (
+                <button
+                  className="secondary"
+                  style={{ marginTop: 8, fontSize: 12, padding: "6px 12px" }}
+                  onClick={() => fetchAtsScore(cvText)}
+                >
+                  📊 Calculer le score ATS
+                </button>
+              )}
             </div>
             <div style={{ gridColumn: "1/-1" }}>
               <label>CV extrait automatiquement (modifiable)</label>
@@ -415,14 +524,15 @@ export default function Page() {
               <button className="primary" onClick={startInterview}>
                 ▶ Démarrer
               </button>
-              <button
-                className="secondary"
-                onClick={startListening}
-                disabled={!speechSupported || textMode}
-                title={textMode ? "Désactivé en mode texte" : !speechSupported ? "Non supporté par ce navigateur" : "Activer la reconnaissance vocale"}
-              >
-                🎤 Activer micro
-              </button>
+              {interviewStarted && !textMode && (
+                <button
+                  className={`answer-btn${isAnswering ? " active" : ""}`}
+                  onClick={isAnswering ? finishAnswering : startAnswering}
+                  disabled={speakingRef.current}
+                >
+                  {isAnswering ? "✅ Fin" : "🎤 Répondre"}
+                </button>
+              )}
               <button
                 className={`text-mode-btn${textMode ? " active" : ""}`}
                 onClick={toggleTextMode}
@@ -440,10 +550,15 @@ export default function Page() {
               </button>
             </div>
           </div>
-          {!speechSupported && !textMode && (
+          {interviewStarted && !textMode && !speechSupported && (
             <p className="meta" style={{ marginTop: 10 }}>
               ⚠️ Reconnaissance vocale non supportée sur ce navigateur (préférez Chrome).
               Utilisez le mode texte pour répondre.
+            </p>
+          )}
+          {interviewStarted && !textMode && speechSupported && (
+            <p className="meta" style={{ marginTop: 10 }}>
+              💡 Cliquez sur <strong>&quot;Répondre&quot;</strong> pour commencer votre réponse, puis sur <strong>&quot;Fin&quot;</strong> quand vous avez terminé.
             </p>
           )}
         </div>
