@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "user" | "assistant";
 type Msg = { role: Role; text: string };
@@ -25,12 +25,27 @@ export default function Page() {
   const [uploadingCv, setUploadingCv] = useState(false);
   const [cvFileName, setCvFileName] = useState("");
 
+  // Camera state
+  const [cameraActive, setCameraActive] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Text input mode state
+  const [textMode, setTextMode] = useState(false);
+  const [textInput, setTextInput] = useState("");
+
   const recognitionRef = useRef<any>(null);
   const speakingRef = useRef(false);
+  const logEndRef = useRef<HTMLDivElement>(null);
 
-  const speechSupported =
-    typeof window !== "undefined" &&
-    (!!window.SpeechRecognition || !!window.webkitSpeechRecognition);
+  const [speechSupported, setSpeechSupported] = useState(false);
+
+  useEffect(() => {
+    setSpeechSupported(
+      typeof window !== "undefined" &&
+      (!!window.SpeechRecognition || !!window.webkitSpeechRecognition)
+    );
+  }, []);
 
   const sendToGemini = async (finalReport = false, externalHistory?: Msg[]) => {
     const history = externalHistory ?? messages;
@@ -121,7 +136,9 @@ export default function Page() {
     setStatus("Démarrage...");
     setSecondsLeft(durationMinutes * 60);
     await sendToGemini(false, initialHistory);
-    startListening();
+    if (!textMode) {
+      startListening();
+    }
   };
 
   const stopInterview = async () => {
@@ -167,6 +184,79 @@ export default function Page() {
     } catch {}
   };
 
+  // Camera toggle
+  const toggleCamera = useCallback(async () => {
+    if (cameraActive) {
+      // Stop camera
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      setCameraActive(false);
+    } else {
+      // Start camera
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+        setCameraActive(true);
+      } catch (err) {
+        const msg = err instanceof DOMException && err.name === "NotAllowedError"
+          ? "Accès caméra refusé — vérifiez les permissions du navigateur"
+          : "Impossible d'accéder à la caméra";
+        setStatus(msg);
+      }
+    }
+  }, [cameraActive]);
+
+  // Clean up camera on unmount
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, []);
+
+  // Text mode toggle
+  const toggleTextMode = () => {
+    setTextMode((prev) => {
+      const next = !prev;
+      if (next) {
+        // Switching to text mode: stop voice recognition
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.stop();
+          } catch {}
+        }
+        setListening(false);
+      }
+      return next;
+    });
+  };
+
+  // Send typed text
+  const sendTextMessage = () => {
+    const text = textInput.trim();
+    if (!text) return;
+    setTextInput("");
+    setMessages((prev) => {
+      const next = [...prev, { role: "user" as const, text }];
+      sendToGemini(false, next);
+      return next;
+    });
+  };
+
+  // Auto-scroll chat
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
   useEffect(() => {
     if (secondsLeft === null) return;
     if (secondsLeft <= 0) {
@@ -194,112 +284,228 @@ export default function Page() {
   }, [secondsLeft]);
 
   return (
-    <main className="container">
-      <div className="card">
-        <h1>🎙️ Interview Voice Simulator</h1>
+    <div style={{ background: "#00040f", minHeight: "100vh" }}>
+      {/* ── Navbar ── */}
+      <div className="container">
+        <nav className="navbar">
+          <div className="navbar-brand">
+            🎙️ <span className="text-gradient">InterviewSim</span>
+          </div>
+          <ul className="navbar-links">
+            <li><a href="#config">Configuration</a></li>
+            <li><a href="#interview">Entretien</a></li>
+          </ul>
+        </nav>
       </div>
 
-      <div className="card grid two">
-        <div>
-          <label>Type de candidature</label>
-          <select
-            value={applicationType}
-            onChange={(e) => setApplicationType(e.target.value)}
-          >
-            <option>Emploi</option>
-            <option>Stage</option>
-            <option>Alternance</option>
-            <option>Freelance</option>
-            <option>Autre</option>
-          </select>
-        </div>
-        <div>
-          <label>Durée (minutes)</label>
-          <input
-            type="number"
-            min={5}
-            max={90}
-            value={durationMinutes}
-            onChange={(e) => setDurationMinutes(Number(e.target.value || 20))}
-          />
-        </div>
-        <div>
-          <label>Intitulé du poste</label>
-          <input
-            value={jobTitle}
-            onChange={(e) => setJobTitle(e.target.value)}
-            placeholder="Data Analyst Marketing"
-          />
-        </div>
-        <div>
-          <label>Description du poste (optionnel)</label>
-          <textarea
-            value={jobDescription}
-            onChange={(e) => setJobDescription(e.target.value)}
-          />
-        </div>
-        <div style={{ gridColumn: "1/-1" }}>
-          <label>Importer le CV (PDF, DOCX, TXT)</label>
-          <input type="file" accept=".pdf,.doc,.docx,.txt" onChange={handleCvUpload} />
-          <p className="meta">
-            {uploadingCv
-              ? "Extraction en cours..."
-              : cvFileName
-                ? `Fichier importé : ${cvFileName}`
-                : "Aucun fichier importé"}
+      {/* ── Hero ── */}
+      <div className="container">
+        <section className="hero">
+          <h1>
+            Simulez vos <span className="text-gradient">Entretiens</span> d&apos;Embauche
+          </h1>
+          <p>
+            Entraînez-vous avec un recruteur IA. Importez votre CV, configurez le poste
+            et lancez un entretien réaliste — par la voix ou par écrit.
           </p>
-        </div>
-        <div style={{ gridColumn: "1/-1" }}>
-          <label>CV extrait automatiquement (modifiable)</label>
-          <textarea
-            value={cvText}
-            onChange={(e) => setCvText(e.target.value)}
-            placeholder="Le texte du CV s'affichera ici après import..."
-          />
+        </section>
+      </div>
+
+      {/* ── Features ── */}
+      <div className="container">
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center", marginBottom: 40 }}>
+          <div className="feature-card" style={{ flex: "1 1 200px", maxWidth: 320 }}>
+            <div className="feature-icon">🎤</div>
+            <div>
+              <h3>Entretien Vocal</h3>
+              <p>Répondez naturellement par la voix grâce à la reconnaissance vocale.</p>
+            </div>
+          </div>
+          <div className="feature-card" style={{ flex: "1 1 200px", maxWidth: 320 }}>
+            <div className="feature-icon">✍️</div>
+            <div>
+              <h3>Réponse Écrite</h3>
+              <p>Préférez taper vos réponses ? Activez le mode texte en un clic.</p>
+            </div>
+          </div>
+          <div className="feature-card" style={{ flex: "1 1 200px", maxWidth: 320 }}>
+            <div className="feature-icon">📹</div>
+            <div>
+              <h3>Caméra</h3>
+              <p>Activez votre webcam pour vous entraîner dans des conditions réelles.</p>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="card">
-        <div
-          className="row"
-          style={{ justifyContent: "space-between", alignItems: "center" }}
-        >
-          <div className="meta">
-            Statut: {status} | Timer: {mmss}
-          </div>
-          <div className="row">
-            <button className="primary" onClick={startInterview}>
-              Démarrer
-            </button>
-            <button
-              className="secondary"
-              onClick={startListening}
-              disabled={!speechSupported}
-            >
-              Activer micro
-            </button>
-            <button className="danger" onClick={stopInterview}>
-              Stop
-            </button>
+      {/* ── Configuration ── */}
+      <div className="container" id="config">
+        <div className="card">
+          <h2>⚙️ Configuration de l&apos;entretien</h2>
+          <div className="grid two">
+            <div>
+              <label>Type de candidature</label>
+              <select
+                value={applicationType}
+                onChange={(e) => setApplicationType(e.target.value)}
+              >
+                <option>Emploi</option>
+                <option>Stage</option>
+                <option>Alternance</option>
+                <option>Freelance</option>
+                <option>Autre</option>
+              </select>
+            </div>
+            <div>
+              <label>Durée (minutes)</label>
+              <input
+                type="number"
+                min={5}
+                max={90}
+                value={durationMinutes}
+                onChange={(e) => setDurationMinutes(Number(e.target.value || 20))}
+              />
+            </div>
+            <div>
+              <label>Intitulé du poste</label>
+              <input
+                value={jobTitle}
+                onChange={(e) => setJobTitle(e.target.value)}
+                placeholder="Data Analyst Marketing"
+              />
+            </div>
+            <div>
+              <label>Description du poste (optionnel)</label>
+              <textarea
+                value={jobDescription}
+                onChange={(e) => setJobDescription(e.target.value)}
+              />
+            </div>
+            <div style={{ gridColumn: "1/-1" }}>
+              <label>Importer le CV (PDF, DOCX, TXT)</label>
+              <input type="file" accept=".pdf,.doc,.docx,.txt" onChange={handleCvUpload} />
+              <p className="meta" style={{ marginTop: 6 }}>
+                {uploadingCv
+                  ? "Extraction en cours..."
+                  : cvFileName
+                    ? `Fichier importé : ${cvFileName}`
+                    : "Aucun fichier importé"}
+              </p>
+            </div>
+            <div style={{ gridColumn: "1/-1" }}>
+              <label>CV extrait automatiquement (modifiable)</label>
+              <textarea
+                value={cvText}
+                onChange={(e) => setCvText(e.target.value)}
+                placeholder="Le texte du CV s'affichera ici après import..."
+              />
+            </div>
           </div>
         </div>
-        {!speechSupported && (
-          <p className="meta">
-            ⚠️ Reconnaissance vocale non supportée sur ce navigateur (préférez
-            Chrome).
-          </p>
+      </div>
+
+      {/* ── Interview Controls ── */}
+      <div className="container" id="interview">
+        <div className="card">
+          <div className="status-bar">
+            <div className="meta" style={{ fontSize: 14 }}>
+              Statut: <strong style={{ color: "#fff" }}>{status}</strong> &nbsp;|&nbsp; ⏱ {mmss}
+            </div>
+            <div className="row">
+              <button className="primary" onClick={startInterview}>
+                ▶ Démarrer
+              </button>
+              <button
+                className="secondary"
+                onClick={startListening}
+                disabled={!speechSupported || textMode}
+                title={textMode ? "Désactivé en mode texte" : !speechSupported ? "Non supporté par ce navigateur" : "Activer la reconnaissance vocale"}
+              >
+                🎤 Activer micro
+              </button>
+              <button
+                className={`text-mode-btn${textMode ? " active" : ""}`}
+                onClick={toggleTextMode}
+              >
+                ✍️ {textMode ? "Mode texte actif" : "Mode texte"}
+              </button>
+              <button
+                className={`camera-btn${cameraActive ? " active" : ""}`}
+                onClick={toggleCamera}
+              >
+                📹 {cameraActive ? "Couper caméra" : "Activer caméra"}
+              </button>
+              <button className="danger" onClick={stopInterview}>
+                ⏹ Stop
+              </button>
+            </div>
+          </div>
+          {!speechSupported && !textMode && (
+            <p className="meta" style={{ marginTop: 10 }}>
+              ⚠️ Reconnaissance vocale non supportée sur ce navigateur (préférez Chrome).
+              Utilisez le mode texte pour répondre.
+            </p>
+          )}
+        </div>
+
+        {/* ── Camera Preview ── */}
+        {cameraActive && (
+          <div className="camera-container">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="camera-preview"
+            />
+          </div>
         )}
+
+        {/* ── Text Input ── */}
+        {textMode && (
+          <div className="card">
+            <label>Tapez votre réponse :</label>
+            <div className="text-input-area">
+              <textarea
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                placeholder="Saisissez votre réponse ici..."
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    sendTextMessage();
+                  }
+                }}
+              />
+              <button className="primary" onClick={sendTextMessage} disabled={!textInput.trim()}>
+                Envoyer
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Chat Log ── */}
+        <div className="card log">
+          {messages.length === 0
+            ? "L'entretien apparaîtra ici..."
+            : messages.map((m, i) => (
+                <div key={i} className={m.role === "assistant" ? "msg-assistant" : "msg-user"}>
+                  <div className="msg-role">
+                    {m.role === "assistant" ? "🤖 Recruteur" : "👤 Vous"}
+                  </div>
+                  {m.text}
+                </div>
+              ))}
+          <div ref={logEndRef} />
+        </div>
       </div>
 
-      <div className="card log">
-        {messages.length === 0
-          ? "L'entretien apparaîtra ici..."
-          : messages.map((m, i) => (
-              <div key={i}>
-                <b>{m.role === "assistant" ? "Recruteur" : "Vous"}:</b> {m.text}
-              </div>
-            ))}
+      {/* ── Footer ── */}
+      <div className="container">
+        <footer className="footer">
+          <p>Interview Voice Simulator — Entraînez-vous. Progressez. Réussissez.</p>
+        </footer>
       </div>
-    </main>
+    </div>
   );
 }
